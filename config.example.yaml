@@ -1,0 +1,61 @@
+# Configuration template. Copy this file to config.yaml and fill in your own
+# values:
+#
+#   cp config.example.yaml config.yaml
+#
+# config.yaml is git-ignored so your real values are never committed. Secrets
+# (such as an Azure OpenAI API key) should be supplied via environment
+# variables — see .env.example — rather than being written into this file.
+
+person:
+  # GitHub login (this is the primary matching key - GitHub comments carry
+  # user.login, not email, so this is what actually filters the data).
+  github_username: "your-github-login"
+  # Kept for record-keeping / cross-checking against commit authorship if you
+  # ever extend the collector to also mine commit messages.
+  email: "you@example.com"
+
+repos:
+  - "your-org/your-repo"
+
+github:
+  # Set a date to only look at PRs updated after it (speeds up
+  # reruns a lot on big repos). Leave null to scan everything.
+  updated_after: null   # e.g. "2025-01-01"
+  # GitHub calls are subprocess/network-bound. Eight concurrent PR scans is
+  # conservative and avoids excessive API pressure.
+  workers: 8
+
+azure_openai:
+  # Can be overridden with AZURE_OPENAI_ENDPOINT (or ENDPOINT_URL).
+  endpoint: "https://your-resource.openai.azure.com/"
+  # Your deployment name, not the base model name. Can be overridden with
+  # AZURE_OPENAI_DEPLOYMENT (or DEPLOYMENT_NAME).
+  deployment: "your-deployment-name"
+  api_version: "2025-03-01-preview"   # override: AZURE_OPENAI_API_VERSION
+  api_mode: "responses"               # override: AZURE_OPENAI_API_MODE
+  request_timeout: 1800               # override: AGENT_REQUEST_TIMEOUT
+  max_output_tokens: 120000           # override: AGENT_MAX_OUTPUT_TOKENS
+  # Optional: supply an Azure OpenAI API key to use key-based auth. Prefer the
+  # AZURE_OPENAI_API_KEY environment variable so the secret is never written to
+  # disk. Leave unset (null) to fall back to Azure AD / `az login`.
+  api_key: null
+
+output:
+  dir: "./output"
+
+analysis:
+  # how many comments to bundle into a single LLM call at the "note it down"
+  # stage. Higher = cheaper/faster, but keep it modest so the model doesn't
+  # lose track of which diff_hunk belongs to which comment.
+  batch_size: 8
+  # A malformed or incomplete model response is retried. If every attempt
+  # fails, the pipeline stops rather than writing incomplete output.
+  max_attempts: 3
+  # Concurrent Azure requests. Increase cautiously if your deployment's RPM
+  # and TPM quotas allow it.
+  workers: 4
+
+synthesis:
+  max_notes_per_call: 400
+  workers: 4

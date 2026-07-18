@@ -1,0 +1,3 @@
+openai==1.109.1
+azure-identity==1.17.0
+PyYAML==6.0.2
