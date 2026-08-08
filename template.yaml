@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: One-repository PR review learning demo on AWS with Azure Foundry AI.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: stage
+    AllowedPattern: '[a-z0-9-]+'
+  Repository:
+    Type: String
+  Reviewer:
+    Type: String
+  GitHubAppId:
+    Type: String
+  GitHubInstallationId:
+    Type: String
+  GitHubWebhookSecretId:
+    Type: String
+  GitHubAppPrivateKeySecretId:
+    Type: String
+  AzureOpenAiApiKeySecretId:
+    Type: String
+  AzureOpenAiEndpoint:
+    Type: String
+  AzureOpenAiDeployment:
+    Type: String
+  AzureOpenAiEmbeddingDeployment:
+    Type: String
+  AzureOpenAiApiVersion:
+    Type: String
+    Default: 2025-03-01-preview
+  EmbeddingDimensions:
+    Type: Number
+    Default: 1536
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    CodeUri: .
+    Tracing: Active
+    Environment:
+      Variables:
+        PR_TO_SKILL_CONFIG: config.example.yaml
+        PR_TO_SKILL_REPO: !Ref Repository
+        PR_TO_SKILL_REVIEWER: !Ref Reviewer
+        GITHUB_APP_ID: !Ref GitHubAppId
+        GITHUB_INSTALLATION_ID: !Ref GitHubInstallationId
+        AZURE_OPENAI_ENDPOINT: !Ref AzureOpenAiEndpoint
+        AZURE_OPENAI_DEPLOYMENT: !Ref AzureOpenAiDeployment
+        AZURE_OPENAI_API_VERSION: !Ref AzureOpenAiApiVersion
+        AZURE_OPENAI_EMBEDDING_DEPLOYMENT: !Ref AzureOpenAiEmbeddingDeployment
+        AZURE_OPENAI_EMBEDDING_DIMENSIONS: !Ref EmbeddingDimensions
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  DeliveryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: key
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  EventDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  EventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 900
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  OpenSearchEncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub pr-skill-${Stage}-enc
+      Type: encryption
+      Policy: !Sub >-
+        {"Rules":[{"ResourceType":"collection","Resource":["collection/pr-skill-${Stage}"]}],"AWSOwnedKey":true}
+
+  OpenSearchNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub pr-skill-${Stage}-net
+      Type: network
+      Policy: !Sub >-
+        [{"Rules":[{"ResourceType":"collection","Resource":["collection/pr-skill-${Stage}"]},{"ResourceType":"dashboard","Resource":["collection/pr-skill-${Stage}"]}],"AllowFromPublic":true}]
+
+  OpenSearchCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - OpenSearchEncryptionPolicy
+      - OpenSearchNetworkPolicy
+    Properties:
+      Name: !Sub pr-skill-${Stage}
+      Type: VECTORSEARCH
+
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: WorkerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub ${ArtifactBucket.Arn}/*
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+                Resource: !GetAtt DeliveryTable.Arn
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !GetAtt EventQueue.Arn
+              - Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !GetAtt OpenSearchCollection.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubAppPrivateKeySecretId}-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AzureOpenAiApiKeySecretId}-*
+
+  OpenSearchDataPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub pr-skill-${Stage}-data
+      Type: data
+      Policy: !Sub
+        - >-
+          [{"Rules":[{"ResourceType":"index","Resource":["index/pr-skill-${Stage}/*"],"Permission":["aoss:CreateIndex","aoss:UpdateIndex","aoss:DescribeIndex","aoss:ReadDocument","aoss:WriteDocument"]},{"ResourceType":"collection","Resource":["collection/pr-skill-${Stage}"],"Permission":["aoss:DescribeCollectionItems"]}],"Principal":["${RoleArn}"]}]
+        - RoleArn: !GetAtt WorkerRole.Arn
+
+  IngressRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: IngressAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt EventQueue.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubWebhookSecretId}-*
+
+  WebhookFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      Handler: lambda_handler.webhook
+      Role: !GetAtt IngressRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          EVENT_QUEUE_URL: !Ref EventQueue
+          GITHUB_WEBHOOK_SECRET_ID: !Ref GitHubWebhookSecretId
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            Path: /github/webhook
+            Method: POST
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: OpenSearchDataPolicy
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      Handler: lambda_handler.process_events
+      Role: !GetAtt WorkerRole.Arn
+      MemorySize: 2048
+      Timeout: 900
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          ARTIFACT_BUCKET: !Ref ArtifactBucket
+          DELIVERY_TABLE: !Ref DeliveryTable
+          GITHUB_APP_PRIVATE_KEY_SECRET_ID: !Ref GitHubAppPrivateKeySecretId
+          AZURE_OPENAI_API_KEY_SECRET_ID: !Ref AzureOpenAiApiKeySecretId
+          AWS_OPENSEARCH_ENABLED: 'true'
+          AWS_OPENSEARCH_ENDPOINT: !GetAtt OpenSearchCollection.CollectionEndpoint
+          AWS_OPENSEARCH_INDEX: pr-review-notes
+          AWS_OPENSEARCH_SERVICE: aoss
+          PR_TO_SKILL_OPENAI_TIMEOUT: '600'
+          PR_TO_SKILL_WORKFLOW_DEADLINE: '780'
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EventQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+Outputs:
+  WebhookUrl:
+    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/github/webhook
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+  EventQueueUrl:
+    Value: !Ref EventQueue
+  OpenSearchEndpoint:
+    Value: !GetAtt OpenSearchCollection.CollectionEndpoint

@@ -41,13 +41,14 @@ azure_openai:
   # disk. Leave unset (null) to fall back to Azure AD / `az login`.
   api_key: null
 
-azure_search:
-  # Optional Azure AI Search vector index for retrieving relevant historical
-  # notes during a PR review. Override secrets with environment variables.
-  enabled: false                         # override: AZURE_SEARCH_ENABLED
-  endpoint: "https://your-search.search.windows.net"
-  index_name: "pr-review-notes"          # override: AZURE_SEARCH_INDEX
-  api_key: null                          # override: AZURE_SEARCH_API_KEY
+aws_opensearch:
+  # Optional Amazon OpenSearch Serverless vector index. AWS requests are
+  # signed with the active IAM role or local AWS profile.
+  enabled: false                         # override: AWS_OPENSEARCH_ENABLED
+  endpoint: "https://your-collection.region.aoss.amazonaws.com"
+  index_name: "pr-review-notes"          # override: AWS_OPENSEARCH_INDEX
+  region: "us-east-1"                    # override: AWS_REGION
+  service: "aoss"                        # override: AWS_OPENSEARCH_SERVICE
   embedding_deployment: "text-embedding-3-small"
   embedding_dimensions: 1536
 
@@ -71,5 +72,5 @@ synthesis:
   workers: 4
 
 automation:
-  # Bound one feedback reconciliation so it fits within the Function deadline.
+  # Bound one feedback reconciliation so it fits within the Lambda deadline.
   max_feedback_per_pull_request: 100

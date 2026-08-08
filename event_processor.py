@@ -1,8 +1,10 @@
 """Idempotent dispatch of validated one-repository webhook jobs."""
 
+from application_ports import DeliveryStore
+
 
 class EventProcessor:
-    def __init__(self, pipeline, delivery_store, allowed_repo: str):
+    def __init__(self, pipeline, delivery_store: DeliveryStore, allowed_repo: str):
         self._pipeline = pipeline
         self._delivery_store = delivery_store
         self._allowed_repo = allowed_repo.lower()

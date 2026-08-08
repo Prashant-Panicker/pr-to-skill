@@ -1,8 +1,7 @@
 openai==1.109.1
 azure-identity==1.17.0
-azure-functions==1.23.0
-azure-search-documents==11.6.0
-azure-storage-blob==12.27.0
+boto3==1.40.40
+opensearch-py==3.0.0
 PyJWT[crypto]==2.10.1
 PyYAML==6.0.2
 requests==2.32.5

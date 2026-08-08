@@ -5,6 +5,7 @@ import os
 import time
 from dataclasses import asdict
 
+from application_ports import ArtifactStore, DeliveryStore, ModelClient, ReviewNoteStore
 from artifact_store import LocalArtifactStore
 import comment_analyzer
 import github_collector
@@ -27,8 +28,14 @@ def _comment_key(comment: dict) -> tuple[str, int | str]:
 
 class IncrementalPipeline:
     def __init__(
-        self, client, deployment: str, store, config: dict,
-        artifact_store=None, reconciliation_lock=None, deadline_seconds: int = 2700,
+        self,
+        client: ModelClient,
+        deployment: str,
+        store: ReviewNoteStore,
+        config: dict,
+        artifact_store: ArtifactStore | None = None,
+        reconciliation_lock: DeliveryStore | None = None,
+        deadline_seconds: int = 2700,
     ):
         self._client = client
         self._deployment = deployment
@@ -105,7 +112,7 @@ class IncrementalPipeline:
         state = self._artifacts.read_json("pipeline_state.json")
         if not isinstance(state, dict) or state.get("version") != 1:
             raise RuntimeError(
-                "Webhook history is not initialized; run --sync-azure-artifacts first"
+                "Webhook history is not initialized; run --sync-aws-artifacts first"
             )
         existing_raw = state.get("raw_comments")
         existing_notes = state.get("notes")

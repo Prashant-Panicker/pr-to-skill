@@ -1,0 +1,131 @@
+name: Deploy AWS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-aws-stage
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: stage
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME }}
+      AWS_SAM_S3_PREFIX: ${{ vars.AWS_SAM_S3_PREFIX }}
+      PR_TO_SKILL_REPO: ${{ vars.PR_TO_SKILL_REPO }}
+      PR_TO_SKILL_REVIEWER: ${{ vars.PR_TO_SKILL_REVIEWER }}
+      GH_APP_ID: ${{ vars.GH_APP_ID }}
+      GH_INSTALLATION_ID: ${{ vars.GH_INSTALLATION_ID }}
+      GH_WEBHOOK_SECRET_ID: ${{ vars.GH_WEBHOOK_SECRET_ID }}
+      GH_APP_PRIVATE_KEY_SECRET_ID: ${{ vars.GH_APP_PRIVATE_KEY_SECRET_ID }}
+      AZURE_OPENAI_API_KEY_SECRET_ID: ${{ vars.AZURE_OPENAI_API_KEY_SECRET_ID }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION }}
+      AZURE_OPENAI_EMBEDDING_DIMENSIONS: ${{ vars.AZURE_OPENAI_EMBEDDING_DIMENSIONS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r requirements.txt
+
+      - run: python -m unittest discover -s tests
+
+      - uses: aws-actions/setup-sam@v2
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate environment configuration
+        env:
+          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+        run: |
+          test -n "$AWS_REGION"
+          test -n "$AWS_STACK_NAME"
+          test -n "$PR_TO_SKILL_REPO"
+          test -n "$PR_TO_SKILL_REVIEWER"
+          test -n "$GH_APP_ID"
+          test -n "$GH_INSTALLATION_ID"
+          test -n "$GH_WEBHOOK_SECRET_ID"
+          test -n "$GH_APP_PRIVATE_KEY_SECRET_ID"
+          test -n "$AZURE_OPENAI_API_KEY_SECRET_ID"
+          test -n "$AZURE_OPENAI_ENDPOINT"
+          test -n "$AZURE_OPENAI_DEPLOYMENT"
+          test -n "$AZURE_OPENAI_EMBEDDING_DEPLOYMENT"
+          test -n "$AZURE_OPENAI_API_VERSION"
+          test -n "$AZURE_OPENAI_EMBEDDING_DIMENSIONS"
+          test -n "$GH_WEBHOOK_SECRET"
+          test -n "$GH_APP_PRIVATE_KEY"
+          test -n "$AZURE_OPENAI_API_KEY"
+
+      - name: Synchronize runtime secrets
+        env:
+          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+        run: |
+          upsert_secret() {
+            local secret_id="$1"
+            local secret_value="$2"
+            if aws secretsmanager describe-secret --secret-id "$secret_id" >/dev/null 2>&1; then
+              aws secretsmanager put-secret-value --secret-id "$secret_id" --secret-string "$secret_value" >/dev/null
+            else
+              aws secretsmanager create-secret --name "$secret_id" --secret-string "$secret_value" >/dev/null
+            fi
+          }
+          upsert_secret "$GH_WEBHOOK_SECRET_ID" "$GH_WEBHOOK_SECRET"
+          upsert_secret "$GH_APP_PRIVATE_KEY_SECRET_ID" "$GH_APP_PRIVATE_KEY"
+          upsert_secret "$AZURE_OPENAI_API_KEY_SECRET_ID" "$AZURE_OPENAI_API_KEY"
+
+      - run: sam validate --lint
+
+      - run: sam build --use-container
+
+      - name: Deploy stack
+        run: |
+          sam deploy \
+            --stack-name "$AWS_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --resolve-s3 \
+            --s3-prefix "${AWS_SAM_S3_PREFIX:-pr-to-skill/stage}" \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Stage=stage \
+              Repository="$PR_TO_SKILL_REPO" \
+              Reviewer="$PR_TO_SKILL_REVIEWER" \
+              GitHubAppId="$GH_APP_ID" \
+              GitHubInstallationId="$GH_INSTALLATION_ID" \
+              GitHubWebhookSecretId="$GH_WEBHOOK_SECRET_ID" \
+              GitHubAppPrivateKeySecretId="$GH_APP_PRIVATE_KEY_SECRET_ID" \
+              AzureOpenAiApiKeySecretId="$AZURE_OPENAI_API_KEY_SECRET_ID" \
+              AzureOpenAiEndpoint="$AZURE_OPENAI_ENDPOINT" \
+              AzureOpenAiDeployment="$AZURE_OPENAI_DEPLOYMENT" \
+              AzureOpenAiEmbeddingDeployment="$AZURE_OPENAI_EMBEDDING_DEPLOYMENT" \
+              AzureOpenAiApiVersion="$AZURE_OPENAI_API_VERSION" \
+              EmbeddingDimensions="$AZURE_OPENAI_EMBEDDING_DIMENSIONS"
+
+      - name: Show webhook URL
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "$AWS_STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='WebhookUrl'].OutputValue" \
+            --output text

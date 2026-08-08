@@ -27,7 +27,7 @@ import comment_analyzer as analyzer
 import skill_synthesizer as synth
 import azure_client
 import vector_store
-from artifact_store import AzureBlobArtifactStore
+from aws_adapters import S3ArtifactStore
 
 
 def load_config(path: str) -> dict:
@@ -44,16 +44,16 @@ def main():
     parser.add_argument("--search-limit", type=int, default=5)
     parser.add_argument("--search-repo", help="repository scope for vector retrieval")
     parser.add_argument(
-        "--sync-azure-artifacts",
+        "--sync-aws-artifacts",
         action="store_true",
-        help="bootstrap webhook artifacts in Azure Blob Storage",
+        help="bootstrap webhook artifacts in Amazon S3",
     )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    search_cfg = vector_store.resolve_config(cfg.get("azure_search", {}))
+    search_cfg = vector_store.resolve_config(cfg.get("aws_opensearch", {}))
     if args.search and not search_cfg["enabled"]:
-        parser.error("--search requires azure_search.enabled: true")
+        parser.error("--search requires aws_opensearch.enabled: true")
 
     if args.search:
         search_repo = args.search_repo
@@ -156,7 +156,7 @@ def main():
     if search_cfg["enabled"]:
         store = vector_store.create_store(search_cfg, client)
         indexed_count = store.save_notes(notes, username)
-        print(f"      Indexed {indexed_count} notes in Azure AI Search")
+        print(f"      Indexed {indexed_count} notes in Amazon OpenSearch")
 
     # --- Stage 3: synthesize the skill ---
     print(f"[3/3] Synthesizing SKILL.md from {len(notes)} notes...")
@@ -172,10 +172,15 @@ def main():
     synth.save_skill(skill_md, skill_path)
     print(f"      Wrote {skill_path}")
 
-    if args.sync_azure_artifacts:
-        connection_string = os.environ.get("AzureWebJobsStorage")
-        account_url = os.environ.get("AZURE_STORAGE_ACCOUNT_URL")
-        artifacts = AzureBlobArtifactStore(connection_string, account_url)
+    if args.sync_aws_artifacts:
+        import boto3
+
+        bucket = os.environ.get("ARTIFACT_BUCKET")
+        if not bucket:
+            parser.error("--sync-aws-artifacts requires ARTIFACT_BUCKET")
+        artifacts = S3ArtifactStore(
+            boto3.client("s3"), bucket, os.environ.get("ARTIFACT_PREFIX", "artifacts")
+        )
         for name, path in (
             ("raw_comments.json", raw_path),
             ("notes.json", notes_json_path),
@@ -187,7 +192,7 @@ def main():
             "pipeline_state.json",
             json.dumps({"version": 1, "raw_comments": raw_comments, "notes": notes}, indent=2),
         )
-        print("      Bootstrapped webhook artifacts in Azure Blob Storage")
+        print("      Bootstrapped webhook artifacts in Amazon S3")
 
     print("\nDone. Pipeline outputs:")
     print(f"  raw comments -> {raw_path}")

@@ -1,157 +1,168 @@
-"""Azure AI Search storage and retrieval for structured review notes."""
+"""AWS OpenSearch vector storage for structured review notes."""
 
 import hashlib
 import os
 
-from azure.core.credentials import AzureKeyCredential
-from azure.identity import DefaultAzureCredential
-from azure.search.documents import SearchClient
-from azure.search.documents.indexes import SearchIndexClient
-from azure.search.documents.indexes.models import (
-    HnswAlgorithmConfiguration,
-    SearchField,
-    SearchFieldDataType,
-    SearchIndex,
-    SearchableField,
-    SimpleField,
-    VectorSearch,
-    VectorSearchProfile,
-)
-from azure.search.documents.models import VectorizedQuery
+import boto3
+from opensearchpy import AWSV4SignerAuth, OpenSearch, RequestsHttpConnection
+
+from application_ports import ModelClient
 
 
 def resolve_config(config: dict, environ: dict[str, str] | None = None) -> dict:
     env = os.environ if environ is None else environ
-    enabled = env.get("AZURE_SEARCH_ENABLED", str(config.get("enabled", False))).lower()
+    enabled = env.get("AWS_OPENSEARCH_ENABLED", str(config.get("enabled", False))).lower()
     if enabled not in {"true", "false"}:
-        raise ValueError("Azure AI Search enabled must be true or false")
+        raise ValueError("AWS OpenSearch enabled must be true or false")
+    try:
+        dimensions = int(env.get(
+            "AZURE_OPENAI_EMBEDDING_DIMENSIONS",
+            config.get("embedding_dimensions", 1536),
+        ))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("embedding_dimensions must be an integer") from exc
     resolved = {
         "enabled": enabled == "true",
-        "endpoint": env.get("AZURE_SEARCH_ENDPOINT") or config.get("endpoint"),
-        "index_name": env.get("AZURE_SEARCH_INDEX") or config.get("index_name", "pr-review-notes"),
-        "api_key": env.get("AZURE_SEARCH_API_KEY") or config.get("api_key"),
+        "endpoint": env.get("AWS_OPENSEARCH_ENDPOINT") or config.get("endpoint"),
+        "index_name": env.get("AWS_OPENSEARCH_INDEX")
+        or config.get("index_name", "pr-review-notes"),
+        "region": env.get("AWS_REGION") or config.get("region", "us-east-1"),
+        "service": env.get("AWS_OPENSEARCH_SERVICE") or config.get("service", "aoss"),
         "embedding_deployment": env.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
         or config.get("embedding_deployment"),
-        "embedding_dimensions": int(
-            env.get("AZURE_OPENAI_EMBEDDING_DIMENSIONS", config.get("embedding_dimensions", 1536))
-        ),
+        "embedding_dimensions": dimensions,
     }
     if resolved["enabled"]:
-        missing = [
-            key for key in ("endpoint", "embedding_deployment") if not resolved[key]
-        ]
+        missing = [key for key in ("endpoint", "embedding_deployment") if not resolved[key]]
         if missing:
-            raise ValueError(f"Azure AI Search requires: {', '.join(missing)}")
-        if resolved["embedding_dimensions"] <= 0:
+            raise ValueError(f"AWS OpenSearch requires: {', '.join(missing)}")
+        if dimensions <= 0:
             raise ValueError("embedding_dimensions must be positive")
-        resolved["endpoint"] = resolved["endpoint"].rstrip("/")
+        resolved["endpoint"] = resolved["endpoint"].replace("https://", "").rstrip("/")
     return resolved
 
 
-def _credential(api_key: str | None):
-    return AzureKeyCredential(api_key) if api_key else DefaultAzureCredential()
-
-
-def create_store(config: dict, embedding_client):
-    credential = _credential(config.get("api_key"))
-    index_client = SearchIndexClient(config["endpoint"], credential)
-    fields = [
-        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-        SearchableField(name="content", type=SearchFieldDataType.String),
-        SimpleField(name="reviewer", type=SearchFieldDataType.String, filterable=True),
-        SimpleField(name="repo", type=SearchFieldDataType.String, filterable=True),
-        SimpleField(name="pr_number", type=SearchFieldDataType.Int64, filterable=True),
-        SimpleField(name="github_comment_id", type=SearchFieldDataType.Int64, filterable=True),
-        SimpleField(name="pr_url", type=SearchFieldDataType.String),
-        SimpleField(name="file_path", type=SearchFieldDataType.String, filterable=True),
-        SimpleField(name="category", type=SearchFieldDataType.String, filterable=True),
-        SimpleField(name="severity", type=SearchFieldDataType.String, filterable=True),
-        SearchField(
-            name="content_vector",
-            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-            searchable=True,
-            vector_search_dimensions=config["embedding_dimensions"],
-            vector_search_profile_name="review-notes-profile",
-        ),
-    ]
-    vector_search = VectorSearch(
-        algorithms=[HnswAlgorithmConfiguration(name="review-notes-hnsw")],
-        profiles=[VectorSearchProfile(
-            name="review-notes-profile",
-            algorithm_configuration_name="review-notes-hnsw",
-        )],
+def create_store(config: dict, embedding_client: ModelClient):
+    credentials = boto3.Session().get_credentials()
+    if credentials is None:
+        raise ValueError("AWS credentials are required for OpenSearch")
+    auth = AWSV4SignerAuth(credentials, config["region"], config["service"])
+    search_client = OpenSearch(
+        hosts=[{"host": config["endpoint"], "port": 443}],
+        http_auth=auth,
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection,
+        timeout=60,
+        max_retries=2,
+        retry_on_timeout=True,
     )
-    index_client.create_or_update_index(
-        SearchIndex(name=config["index_name"], fields=fields, vector_search=vector_search)
-    )
-    search_client = SearchClient(config["endpoint"], config["index_name"], credential)
-    return AzureReviewNoteStore(
-        search_client, embedding_client, config["embedding_deployment"]
+    return OpenSearchReviewNoteStore(
+        search_client,
+        embedding_client,
+        config["embedding_deployment"],
+        config["index_name"],
+        config["embedding_dimensions"],
     )
 
 
-class AzureReviewNoteStore:
-    def __init__(self, search_client, embedding_client, embedding_deployment: str):
+class OpenSearchReviewNoteStore:
+    def __init__(
+        self,
+        search_client,
+        embedding_client: ModelClient,
+        embedding_deployment: str,
+        index_name: str = "pr-review-notes",
+        embedding_dimensions: int = 1536,
+    ):
         self._search_client = search_client
         self._embedding_client = embedding_client
         self._embedding_deployment = embedding_deployment
+        self._index_name = index_name
+        if not self._search_client.indices.exists(index=index_name):
+            self._search_client.indices.create(index=index_name, body={
+                "settings": {"index": {"knn": True}},
+                "mappings": {"properties": {
+                    "content": {"type": "text"},
+                    "content_vector": {
+                        "type": "knn_vector",
+                        "dimension": embedding_dimensions,
+                        "method": {
+                            "name": "hnsw",
+                            "engine": "faiss",
+                            "space_type": "cosinesimil",
+                        },
+                    },
+                    "reviewer": {"type": "keyword"},
+                    "repo": {"type": "keyword"},
+                    "pr_number": {"type": "long"},
+                    "github_comment_id": {"type": "long"},
+                    "pr_url": {"type": "keyword", "index": False},
+                    "file_path": {"type": "keyword"},
+                    "category": {"type": "keyword"},
+                    "severity": {"type": "keyword"},
+                }},
+            })
 
     @staticmethod
     def _content(note: dict) -> str:
-        return "\n".join(
-            value for value in (
-                note["original_issue"],
-                note["requested_change"],
-                note["rationale"],
-                note["original_body"],
-            ) if value
-        )
+        return "\n".join(value for value in (
+            note["original_issue"],
+            note["requested_change"],
+            note["rationale"],
+            note["original_body"],
+        ) if value)
+
+    @staticmethod
+    def _id(note: dict) -> str:
+        source_identity = note.get("github_comment_id") or "|".join((
+            str(note["pr_number"]), note.get("file_path") or "", note["original_body"]
+        ))
+        identity = f'{note["repo"]}|{note["comment_type"]}|{source_identity}'
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     def save_notes(self, notes: list[dict], reviewer: str) -> int:
         if not notes:
             return 0
         contents = [self._content(note) for note in notes]
         vectors = self._embedding_client.embed(self._embedding_deployment, contents)
-        documents = []
+        body = []
         for note, content, vector in zip(notes, contents, vectors):
-            source_identity = note.get("github_comment_id") or "|".join((
-                str(note["pr_number"]), note.get("file_path") or "", note["original_body"]
+            body.extend((
+                {"index": {"_index": self._index_name, "_id": self._id(note)}},
+                {
+                    "content": content,
+                    "content_vector": vector,
+                    "reviewer": reviewer,
+                    "repo": note["repo"],
+                    "pr_number": note["pr_number"],
+                    "github_comment_id": note.get("github_comment_id"),
+                    "pr_url": note["pr_url"],
+                    "file_path": note.get("file_path"),
+                    "category": note["category"],
+                    "severity": note["severity"],
+                },
             ))
-            identity = f'{note["repo"]}|{note["comment_type"]}|{source_identity}'
-            documents.append({
-                "id": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-                "content": content,
-                "content_vector": vector,
-                "reviewer": reviewer,
-                "repo": note["repo"],
-                "pr_number": note["pr_number"],
-                "github_comment_id": note.get("github_comment_id"),
-                "pr_url": note["pr_url"],
-                "file_path": note.get("file_path"),
-                "category": note["category"],
-                "severity": note["severity"],
-            })
-        results = self._search_client.upload_documents(documents)
-        failures = [result for result in results if not result.succeeded]
-        if failures:
-            raise RuntimeError(f"Azure AI Search rejected {len(failures)} review notes")
-        return len(documents)
+        response = self._search_client.bulk(body=body, refresh=True)
+        if response.get("errors"):
+            raise RuntimeError("AWS OpenSearch rejected one or more review notes")
+        return len(notes)
 
     def delete_notes(self, notes: list[dict]) -> int:
-        keys = []
-        for note in notes:
-            source_identity = note.get("github_comment_id") or "|".join((
-                str(note["pr_number"]), note.get("file_path") or "", note["original_body"]
-            ))
-            identity = f'{note["repo"]}|{note["comment_type"]}|{source_identity}'
-            keys.append({"id": hashlib.sha256(identity.encode("utf-8")).hexdigest()})
-        if not keys:
+        if not notes:
             return 0
-        results = self._search_client.delete_documents(documents=keys)
-        failures = [result for result in results if not result.succeeded]
-        if failures:
-            raise RuntimeError(f"Azure AI Search rejected {len(failures)} note deletions")
-        return len(keys)
+        body = [
+            {"delete": {"_index": self._index_name, "_id": self._id(note)}}
+            for note in notes
+        ]
+        response = self._search_client.bulk(body=body, refresh=True)
+        failures = [
+            item for item in response.get("items", [])
+            if item.get("delete", {}).get("status") not in {200, 404}
+        ]
+        if response.get("errors") and failures:
+            raise RuntimeError("AWS OpenSearch rejected one or more note deletions")
+        return len(notes)
 
     def search(
         self, query: str, repo: str, limit: int = 5, reviewer: str | None = None
@@ -161,17 +172,18 @@ class AzureReviewNoteStore:
         if limit < 1:
             raise ValueError("search limit must be at least 1")
         vector = self._embedding_client.embed(self._embedding_deployment, [query])[0]
-        vector_query = VectorizedQuery(vector=vector, k_nearest_neighbors=limit, fields="content_vector")
-        escaped_repo = repo.replace("'", "''")
-        filters = [f"repo eq '{escaped_repo}'"]
+        filters = [{"term": {"repo": repo}}]
         if reviewer:
-            escaped = reviewer.replace("'", "''")
-            filters.append(f"reviewer eq '{escaped}'")
-        results = self._search_client.search(
-            search_text=query,
-            vector_queries=[vector_query],
-            filter=" and ".join(filters),
-            top=limit,
-            select=["content", "repo", "pr_number", "pr_url", "file_path", "category", "severity"],
-        )
-        return [dict(result) for result in results]
+            filters.append({"term": {"reviewer": reviewer}})
+        response = self._search_client.search(index=self._index_name, body={
+            "size": limit,
+            "_source": [
+                "content", "repo", "pr_number", "pr_url", "file_path", "category", "severity"
+            ],
+            "query": {"knn": {"content_vector": {
+                "vector": vector,
+                "k": limit,
+                "filter": {"bool": {"filter": filters}},
+            }}},
+        })
+        return [hit["_source"] for hit in response.get("hits", {}).get("hits", [])]
