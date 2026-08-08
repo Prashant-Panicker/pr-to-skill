@@ -26,6 +26,8 @@ import github_collector as gh
 import comment_analyzer as analyzer
 import skill_synthesizer as synth
 import azure_client
+import vector_store
+from artifact_store import AzureBlobArtifactStore
 
 
 def load_config(path: str) -> dict:
@@ -38,9 +40,43 @@ def main():
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--skip-collect", action="store_true", help="reuse existing raw_comments.json")
     parser.add_argument("--skip-analyze", action="store_true", help="reuse existing notes.json")
+    parser.add_argument("--search", help="retrieve relevant historical review notes")
+    parser.add_argument("--search-limit", type=int, default=5)
+    parser.add_argument("--search-repo", help="repository scope for vector retrieval")
+    parser.add_argument(
+        "--sync-azure-artifacts",
+        action="store_true",
+        help="bootstrap webhook artifacts in Azure Blob Storage",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    search_cfg = vector_store.resolve_config(cfg.get("azure_search", {}))
+    if args.search and not search_cfg["enabled"]:
+        parser.error("--search requires azure_search.enabled: true")
+
+    if args.search:
+        search_repo = args.search_repo
+        if search_repo is None:
+            if len(cfg.get("repos", [])) != 1:
+                parser.error("--search-repo is required when multiple repos are configured")
+            search_repo = cfg["repos"][0]
+        az_cfg = azure_client.resolve_config(cfg["azure_openai"])
+        client = azure_client.get_client(
+            endpoint=az_cfg["endpoint"], api_version=az_cfg["api_version"],
+            request_timeout=az_cfg["request_timeout"], api_mode=az_cfg["api_mode"],
+            max_output_tokens=az_cfg["max_output_tokens"], api_key=az_cfg.get("api_key"),
+        )
+        store = vector_store.create_store(search_cfg, client)
+        results = store.search(
+            args.search,
+            search_repo,
+            limit=args.search_limit,
+            reviewer=cfg["person"]["github_username"],
+        )
+        print(json.dumps(results, indent=2))
+        return
+
     out_dir = cfg["output"]["dir"]
     os.makedirs(out_dir, exist_ok=True)
 
@@ -117,6 +153,11 @@ def main():
             notes = json.load(f)
         print(f"      Wrote {notes_json_path} and {notes_md_path}")
 
+    if search_cfg["enabled"]:
+        store = vector_store.create_store(search_cfg, client)
+        indexed_count = store.save_notes(notes, username)
+        print(f"      Indexed {indexed_count} notes in Azure AI Search")
+
     # --- Stage 3: synthesize the skill ---
     print(f"[3/3] Synthesizing SKILL.md from {len(notes)} notes...")
     synthesis_cfg = cfg.get("synthesis", {})
@@ -130,6 +171,23 @@ def main():
     )
     synth.save_skill(skill_md, skill_path)
     print(f"      Wrote {skill_path}")
+
+    if args.sync_azure_artifacts:
+        connection_string = os.environ.get("AzureWebJobsStorage")
+        account_url = os.environ.get("AZURE_STORAGE_ACCOUNT_URL")
+        artifacts = AzureBlobArtifactStore(connection_string, account_url)
+        for name, path in (
+            ("raw_comments.json", raw_path),
+            ("notes.json", notes_json_path),
+            ("SKILL.md", skill_path),
+        ):
+            with open(path) as source:
+                artifacts.write_text(name, source.read())
+        artifacts.write_text(
+            "pipeline_state.json",
+            json.dumps({"version": 1, "raw_comments": raw_comments, "notes": notes}, indent=2),
+        )
+        print("      Bootstrapped webhook artifacts in Azure Blob Storage")
 
     print("\nDone. Pipeline outputs:")
     print(f"  raw comments -> {raw_path}")

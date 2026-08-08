@@ -108,6 +108,16 @@ class AzureModelClient:
             raise ValueError("Azure OpenAI JSON response must be an object")
         return value
 
+    def embed(self, deployment: str, texts: list[str]) -> list[list[float]]:
+        if not texts or any(not isinstance(text, str) or not text.strip() for text in texts):
+            raise ValueError("embedding input must contain non-empty strings")
+        response = self._client.embeddings.create(model=deployment, input=texts)
+        data = getattr(response, "data", None)
+        if not isinstance(data, list) or len(data) != len(texts):
+            raise ValueError("Azure OpenAI returned an invalid embedding response")
+        ordered = sorted(data, key=lambda item: item.index)
+        return [item.embedding for item in ordered]
+
 
 def get_client(
     endpoint: str,

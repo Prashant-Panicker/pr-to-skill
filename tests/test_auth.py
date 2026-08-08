@@ -10,11 +10,21 @@ identity_stub.DefaultAzureCredential = Mock(return_value="credential")
 identity_stub.get_bearer_token_provider = Mock(return_value="provider")
 azure_stub = types.ModuleType("azure")
 azure_stub.identity = identity_stub
+previous_azure = sys.modules.get("azure")
+previous_identity = sys.modules.get("azure.identity")
 sys.modules["azure"] = azure_stub
 sys.modules["azure.identity"] = identity_stub
 
 sys.modules.pop("auth", None)
 auth = importlib.import_module("auth")
+if previous_azure is None:
+    sys.modules.pop("azure", None)
+else:
+    sys.modules["azure"] = previous_azure
+if previous_identity is None:
+    sys.modules.pop("azure.identity", None)
+else:
+    sys.modules["azure.identity"] = previous_identity
 
 
 class AuthTests(unittest.TestCase):
@@ -28,7 +38,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(provider, "provider")
         identity_stub.DefaultAzureCredential.assert_called_once_with(
             exclude_environment_credential=False,
-            exclude_managed_identity_credential=True,
+            exclude_managed_identity_credential=False,
             exclude_shared_token_cache_credential=False,
             exclude_visual_studio_code_credential=True,
             exclude_cli_credential=False,

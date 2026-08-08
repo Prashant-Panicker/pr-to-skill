@@ -36,7 +36,7 @@ def get_token_provider():
     """Return the refreshing bearer-token provider expected by ``AzureOpenAI``."""
     credential = DefaultAzureCredential(
         exclude_environment_credential=False,
-        exclude_managed_identity_credential=True,
+      exclude_managed_identity_credential=False,
         exclude_shared_token_cache_credential=False,
         exclude_visual_studio_code_credential=True,
         exclude_cli_credential=False,

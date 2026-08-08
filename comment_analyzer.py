@@ -65,6 +65,7 @@ REQUIRED_ITEM_FIELDS = {
 class Note:
     repo: str
     pr_number: int
+    github_comment_id: int
     pr_title: str
     pr_url: str
     comment_type: str
@@ -128,7 +129,8 @@ def analyze_batch(client, deployment: str, batch: list[dict]) -> list[Note]:
     notes = []
     for c, item in zip(batch, items):
         notes.append(Note(
-            repo=c["repo"], pr_number=c["pr_number"], pr_title=c["pr_title"],
+            repo=c["repo"], pr_number=c["pr_number"],
+            github_comment_id=c["github_comment_id"], pr_title=c["pr_title"],
             pr_url=c["pr_url"], comment_type=c["comment_type"], file_path=c.get("file_path"),
             original_body=c["body"],
             category=item["category"],

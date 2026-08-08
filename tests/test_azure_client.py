@@ -11,7 +11,9 @@ if "openai" not in sys.modules:
     openai_stub.AzureOpenAI = object
     sys.modules["openai"] = openai_stub
 
-if "azure.identity" not in sys.modules:
+try:
+    import azure.identity
+except ImportError:
     azure_stub = types.ModuleType("azure")
     identity_stub = types.ModuleType("azure.identity")
     identity_stub.DefaultAzureCredential = object
@@ -228,6 +230,23 @@ class AzureModelClientTests(unittest.TestCase):
         result = client.call_json("deployment", "system", "user")
 
         self.assertEqual(result, {"items": []})
+
+    def test_returns_embeddings_in_input_order(self):
+        embeddings = Mock()
+        embeddings.create.return_value = types.SimpleNamespace(data=[
+            types.SimpleNamespace(index=1, embedding=[0.3, 0.4]),
+            types.SimpleNamespace(index=0, embedding=[0.1, 0.2]),
+        ])
+        client = azure_client.AzureModelClient(
+            types.SimpleNamespace(embeddings=embeddings)
+        )
+
+        result = client.embed("embedding-deployment", ["first", "second"])
+
+        self.assertEqual(result, [[0.1, 0.2], [0.3, 0.4]])
+        embeddings.create.assert_called_once_with(
+            model="embedding-deployment", input=["first", "second"]
+        )
 
     def test_rejects_invalid_json(self):
         client = adapter_for(Response([Choice("not json")]))

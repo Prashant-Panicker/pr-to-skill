@@ -8,12 +8,16 @@ you've already set up (`gh auth login`), handles pagination cleanly with
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from typing import Optional
+
+import jwt
+import requests
 
 
 # Transport failures can occur while `gh` is reading a GitHub API response.
@@ -58,8 +62,107 @@ def _is_transient_gh_error(stderr: str) -> bool:
     return any(marker in stderr.lower() for marker in _TRANSIENT_GH_ERROR_MARKERS)
 
 
+class _GitHubTokenProvider:
+    def __init__(self):
+        self._token: str | None = None
+        self._expires_at = 0.0
+
+    def get(self) -> str:
+        configured_token = os.environ.get("GITHUB_TOKEN")
+        if configured_token:
+            return configured_token
+        if self._token and time.time() < self._expires_at - 300:
+            return self._token
+        app_id = os.environ.get("GITHUB_APP_ID")
+        installation_id = os.environ.get("GITHUB_INSTALLATION_ID")
+        private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY", "").replace("\\n", "\n")
+        if not app_id or not installation_id or not private_key:
+            raise ValueError(
+                "GitHub HTTP access requires GITHUB_TOKEN or GitHub App credentials"
+            )
+        now = int(time.time())
+        app_token = jwt.encode(
+            {"iat": now - 60, "exp": now + 540, "iss": app_id},
+            private_key,
+            algorithm="RS256",
+        )
+        response = requests.post(
+            f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {app_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        self._token = payload["token"]
+        self._expires_at = time.time() + 3300
+        return self._token
+
+
+_TOKEN_PROVIDER = _GitHubTokenProvider()
+
+
+def _run_github_api(args: list[str], max_retries: int) -> list | dict:
+    paginate = "--paginate" in args
+    method = "GET"
+    fields: dict[str, str] = {}
+    endpoint = None
+    index = 1
+    while index < len(args):
+        argument = args[index]
+        if argument == "--paginate":
+            index += 1
+        elif argument == "--method":
+            method = args[index + 1]
+            index += 2
+        elif argument == "-f":
+            key, value = args[index + 1].split("=", 1)
+            fields[key] = value
+            index += 2
+        else:
+            endpoint = argument
+            index += 1
+    if endpoint is None:
+        raise ValueError("GitHub API endpoint is required")
+
+    url = f"https://api.github.com/{endpoint.lstrip('/')}"
+    collected: list = []
+    while url:
+        for attempt in range(max_retries):
+            response = requests.request(
+                method,
+                url,
+                headers={
+                    "Authorization": f"Bearer {_TOKEN_PROVIDER.get()}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                json=fields or None,
+                timeout=60,
+            )
+            if response.status_code not in {429, 502, 503, 504}:
+                response.raise_for_status()
+                break
+            if attempt == max_retries - 1:
+                response.raise_for_status()
+            time.sleep(2 ** attempt)
+        payload = response.json()
+        if not paginate:
+            return payload
+        if not isinstance(payload, list):
+            raise ValueError("Paginated GitHub response must be an array")
+        collected.extend(payload)
+        url = response.links.get("next", {}).get("url")
+    return collected
+
+
 def run_gh(args: list[str], max_retries: int = 3) -> list | dict:
     """Run a `gh` command and return parsed JSON, retrying transient failures."""
+    if os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_APP_ID"):
+        return _run_github_api(args, max_retries)
     cmd = ["gh"] + args
     
     for attempt in range(max_retries):
@@ -112,6 +215,7 @@ def run_gh(args: list[str], max_retries: int = 3) -> list | dict:
 class RawComment:
     repo: str
     pr_number: int
+    github_comment_id: int
     pr_title: str
     pr_url: str
     pr_state: str
@@ -131,6 +235,15 @@ def list_closed_prs(repo: str, updated_after: Optional[str] = None) -> list[dict
     if updated_after:
         prs = [p for p in prs if p["updated_at"] >= updated_after]
     return prs
+
+
+def get_pull_request(repo: str, pr_number: int) -> dict:
+    return run_gh(["api", f"repos/{repo}/pulls/{pr_number}"])
+
+
+def get_pull_request_files(repo: str, pr_number: int) -> list[dict]:
+    endpoint = f"repos/{repo}/pulls/{pr_number}/files?per_page=100"
+    return run_gh(["api", "--paginate", endpoint])
 
 
 def get_pr_review_comments(repo: str, pr_number: int) -> list[dict]:
@@ -166,7 +279,8 @@ def _collect_for_pr(repo: str, username: str, pr: dict, progress_cb=None) -> lis
         if c.get("user", {}).get("login") != username:
             continue
         out.append(RawComment(
-            repo=repo, pr_number=pr_number, pr_title=pr_title, pr_url=pr_url,
+            repo=repo, pr_number=pr_number, github_comment_id=c["id"],
+            pr_title=pr_title, pr_url=pr_url,
             pr_state=pr_state, comment_type="review_comment",
             file_path=c.get("path"), diff_hunk=c.get("diff_hunk"),
             body=c.get("body", ""), review_state=None,
@@ -177,10 +291,13 @@ def _collect_for_pr(repo: str, username: str, pr: dict, progress_cb=None) -> lis
     for r in get_pr_reviews(repo, pr_number):
         if r.get("user", {}).get("login") != username:
             continue
+        if r.get("state") == "DISMISSED":
+            continue
         if not r.get("body"):
             continue  # skip empty-body approvals, nothing to learn from
         out.append(RawComment(
-            repo=repo, pr_number=pr_number, pr_title=pr_title, pr_url=pr_url,
+            repo=repo, pr_number=pr_number, github_comment_id=r["id"],
+            pr_title=pr_title, pr_url=pr_url,
             pr_state=pr_state, comment_type="review_summary",
             file_path=None, diff_hunk=None,
             body=r.get("body", ""), review_state=r.get("state"),
@@ -192,7 +309,8 @@ def _collect_for_pr(repo: str, username: str, pr: dict, progress_cb=None) -> lis
         if c.get("user", {}).get("login") != username:
             continue
         out.append(RawComment(
-            repo=repo, pr_number=pr_number, pr_title=pr_title, pr_url=pr_url,
+            repo=repo, pr_number=pr_number, github_comment_id=c["id"],
+            pr_title=pr_title, pr_url=pr_url,
             pr_state=pr_state, comment_type="issue_comment",
             file_path=None, diff_hunk=None,
             body=c.get("body", ""), review_state=None,
@@ -215,6 +333,11 @@ def collect_for_repo(repo: str, username: str, updated_after: Optional[str] = No
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="github") as executor:
         per_pr_comments = executor.map(collect, prs)
         return [comment for comments in per_pr_comments for comment in comments]
+
+
+def collect_for_pull_request(repo: str, username: str, pr_number: int) -> list[RawComment]:
+    """Collect current review evidence for one open or closed pull request."""
+    return _collect_for_pr(repo, username, get_pull_request(repo, pr_number))
 
 
 def collect_all(repos: list[str], username: str, updated_after: Optional[str] = None,

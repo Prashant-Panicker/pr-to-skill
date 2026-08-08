@@ -1,0 +1,23 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "AZURE_STORAGE_ACCOUNT_URL": "",
+    "PR_TO_SKILL_CONFIG": "config.example.yaml",
+    "PR_TO_SKILL_REPO": "your-org/your-repo",
+    "PR_TO_SKILL_REVIEWER": "your-github-login",
+    "PR_TO_SKILL_OPENAI_TIMEOUT": "600",
+    "PR_TO_SKILL_WORKFLOW_DEADLINE": "2700",
+    "GITHUB_WEBHOOK_SECRET": "set-locally-or-use-an-Azure-Key-Vault-reference",
+    "GITHUB_APP_ID": "your-app-id",
+    "GITHUB_INSTALLATION_ID": "your-installation-id",
+    "GITHUB_APP_PRIVATE_KEY": "your-private-key",
+    "AZURE_OPENAI_ENDPOINT": "https://your-resource.openai.azure.com/",
+    "AZURE_OPENAI_DEPLOYMENT": "your-chat-deployment",
+    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "your-embedding-deployment",
+    "AZURE_SEARCH_ENABLED": "true",
+    "AZURE_SEARCH_ENDPOINT": "https://your-search.search.windows.net",
+    "AZURE_SEARCH_INDEX": "pr-review-notes"
+  }
+}

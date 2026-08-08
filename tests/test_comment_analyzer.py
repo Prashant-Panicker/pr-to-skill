@@ -8,6 +8,7 @@ def raw_comment(number=1):
     return {
         "repo": "org/repo",
         "pr_number": number,
+        "github_comment_id": 1000 + number,
         "pr_title": "A pull request",
         "pr_url": f"https://example.test/pull/{number}",
         "comment_type": "review_comment",

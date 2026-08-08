@@ -8,6 +8,7 @@ secrets.*
 
 # --- Local configuration (copy config.example.yaml -> config.yaml) ---
 config.yaml
+local.settings.json
 
 # --- Pipeline output ---
 output/
