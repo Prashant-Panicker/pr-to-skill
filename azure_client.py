@@ -170,10 +170,14 @@ def resolve_config(config: dict, environ: dict[str, str] | None = None) -> dict:
         max_output_tokens = int(
             env.get("AGENT_MAX_OUTPUT_TOKENS", config.get("max_output_tokens", 30000))
         )
+        embedding_dimensions = int(env.get(
+            "AZURE_OPENAI_EMBEDDING_DIMENSIONS",
+            config.get("embedding_dimensions", 1536),
+        ))
     except (TypeError, ValueError) as exc:
-        raise ValueError("Azure timeout and output-token settings must be integers") from exc
-    if request_timeout <= 0 or max_output_tokens <= 0:
-        raise ValueError("Azure timeout and output-token settings must be positive")
+        raise ValueError("Azure numeric settings must be integers") from exc
+    if request_timeout <= 0 or max_output_tokens <= 0 or embedding_dimensions <= 0:
+        raise ValueError("Azure numeric settings must be positive")
 
     return {
         "endpoint": endpoint.rstrip("/"),
@@ -187,6 +191,9 @@ def resolve_config(config: dict, environ: dict[str, str] | None = None) -> dict:
         ),
         "request_timeout": request_timeout,
         "max_output_tokens": max_output_tokens,
+        "embedding_deployment": env.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
+        or config.get("embedding_deployment"),
+        "embedding_dimensions": embedding_dimensions,
         # ``None`` means "use Azure AD authentication". The key itself is kept
         # out of logs and never echoed back by the pipeline.
         "api_key": get_api_key(config, env),

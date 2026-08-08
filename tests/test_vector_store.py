@@ -90,7 +90,8 @@ class VectorStoreTests(unittest.TestCase):
     def test_resolve_config_requires_vector_dependencies_when_enabled(self):
         with self.assertRaisesRegex(ValueError, "embedding_deployment"):
             vector_store.resolve_config(
-                {"enabled": True, "endpoint": "search.example"}, {}
+                {"enabled": True, "endpoint": "search.example"}, {},
+                embedding_deployment=None,
             )
 
 

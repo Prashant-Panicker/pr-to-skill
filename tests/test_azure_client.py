@@ -163,6 +163,8 @@ class AzureModelClientTests(unittest.TestCase):
                 "api_mode": "responses",
                 "request_timeout": 1800,
                 "max_output_tokens": 30000,
+                "embedding_deployment": None,
+                "embedding_dimensions": 1536,
                 "api_key": None,
             },
         )

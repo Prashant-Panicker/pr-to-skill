@@ -36,6 +36,9 @@ azure_openai:
   api_mode: "responses"               # override: AZURE_OPENAI_API_MODE
   request_timeout: 1800               # override: AGENT_REQUEST_TIMEOUT
   max_output_tokens: 120000           # override: AGENT_MAX_OUTPUT_TOKENS
+  # Azure Foundry embedding deployment used by the OpenSearch vector adapter.
+  embedding_deployment: "text-embedding-3-small" # override: AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+  embedding_dimensions: 1536                  # override: AZURE_OPENAI_EMBEDDING_DIMENSIONS
   # Optional: supply an Azure OpenAI API key to use key-based auth. Prefer the
   # AZURE_OPENAI_API_KEY environment variable so the secret is never written to
   # disk. Leave unset (null) to fall back to Azure AD / `az login`.
@@ -49,8 +52,6 @@ aws_opensearch:
   index_name: "pr-review-notes"          # override: AWS_OPENSEARCH_INDEX
   region: "us-east-1"                    # override: AWS_REGION
   service: "aoss"                        # override: AWS_OPENSEARCH_SERVICE
-  embedding_deployment: "text-embedding-3-small"
-  embedding_dimensions: 1536
 
 output:
   dir: "./output"

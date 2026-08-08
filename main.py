@@ -51,7 +51,12 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    search_cfg = vector_store.resolve_config(cfg.get("aws_opensearch", {}))
+    az_cfg = azure_client.resolve_config(cfg["azure_openai"])
+    search_cfg = vector_store.resolve_config(
+        cfg.get("aws_opensearch", {}),
+        embedding_deployment=az_cfg.get("embedding_deployment"),
+        embedding_dimensions=az_cfg["embedding_dimensions"],
+    )
     if args.search and not search_cfg["enabled"]:
         parser.error("--search requires aws_opensearch.enabled: true")
 
@@ -61,7 +66,6 @@ def main():
             if len(cfg.get("repos", [])) != 1:
                 parser.error("--search-repo is required when multiple repos are configured")
             search_repo = cfg["repos"][0]
-        az_cfg = azure_client.resolve_config(cfg["azure_openai"])
         client = azure_client.get_client(
             endpoint=az_cfg["endpoint"], api_version=az_cfg["api_version"],
             request_timeout=az_cfg["request_timeout"], api_mode=az_cfg["api_mode"],
@@ -110,7 +114,6 @@ def main():
         sys.exit(1)
 
     # --- Set up Azure OpenAI client ---
-    az_cfg = azure_client.resolve_config(cfg["azure_openai"])
     auth_method = "API key" if az_cfg.get("api_key") else "Azure AD (az login)"
     print(f"      Authenticating to Azure OpenAI via {auth_method}")
     client = azure_client.get_client(

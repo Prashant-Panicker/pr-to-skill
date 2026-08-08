@@ -9,18 +9,17 @@ from opensearchpy import AWSV4SignerAuth, OpenSearch, RequestsHttpConnection
 from application_ports import ModelClient
 
 
-def resolve_config(config: dict, environ: dict[str, str] | None = None) -> dict:
+def resolve_config(
+    config: dict,
+    environ: dict[str, str] | None = None,
+    *,
+    embedding_deployment: str | None = None,
+    embedding_dimensions: int = 1536,
+) -> dict:
     env = os.environ if environ is None else environ
     enabled = env.get("AWS_OPENSEARCH_ENABLED", str(config.get("enabled", False))).lower()
     if enabled not in {"true", "false"}:
         raise ValueError("AWS OpenSearch enabled must be true or false")
-    try:
-        dimensions = int(env.get(
-            "AZURE_OPENAI_EMBEDDING_DIMENSIONS",
-            config.get("embedding_dimensions", 1536),
-        ))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("embedding_dimensions must be an integer") from exc
     resolved = {
         "enabled": enabled == "true",
         "endpoint": env.get("AWS_OPENSEARCH_ENDPOINT") or config.get("endpoint"),
@@ -28,15 +27,14 @@ def resolve_config(config: dict, environ: dict[str, str] | None = None) -> dict:
         or config.get("index_name", "pr-review-notes"),
         "region": env.get("AWS_REGION") or config.get("region", "us-east-1"),
         "service": env.get("AWS_OPENSEARCH_SERVICE") or config.get("service", "aoss"),
-        "embedding_deployment": env.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
-        or config.get("embedding_deployment"),
-        "embedding_dimensions": dimensions,
+        "embedding_deployment": embedding_deployment,
+        "embedding_dimensions": embedding_dimensions,
     }
     if resolved["enabled"]:
         missing = [key for key in ("endpoint", "embedding_deployment") if not resolved[key]]
         if missing:
             raise ValueError(f"AWS OpenSearch requires: {', '.join(missing)}")
-        if dimensions <= 0:
+        if embedding_dimensions <= 0:
             raise ValueError("embedding_dimensions must be positive")
         resolved["endpoint"] = resolved["endpoint"].replace("https://", "").rstrip("/")
     return resolved

@@ -60,10 +60,14 @@ def build_event_processor() -> EventProcessor:
     repos = config.get("repos", [])
     if len(repos) != 1:
         raise ValueError("The AWS demo deployment requires exactly one configured repository")
-    search_config = vector_store.resolve_config(config.get("aws_opensearch", {}))
+    openai_config = azure_client.resolve_config(config["azure_openai"])
+    search_config = vector_store.resolve_config(
+        config.get("aws_opensearch", {}),
+        embedding_deployment=openai_config.get("embedding_deployment"),
+        embedding_dimensions=openai_config["embedding_dimensions"],
+    )
     if not search_config["enabled"]:
         raise ValueError("The AWS worker requires aws_opensearch.enabled: true")
-    openai_config = azure_client.resolve_config(config["azure_openai"])
     request_timeout = int(os.environ.get("PR_TO_SKILL_OPENAI_TIMEOUT", "600"))
     if request_timeout <= 0 or request_timeout > 600:
         raise ValueError("PR_TO_SKILL_OPENAI_TIMEOUT must be between 1 and 600 seconds")
