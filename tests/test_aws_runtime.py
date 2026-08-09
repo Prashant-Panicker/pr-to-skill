@@ -37,6 +37,39 @@ class AwsRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "string value"):
             aws_runtime.load_secret("secret-name")
 
+    @patch("aws_runtime.boto3.client")
+    def test_aws_client_uses_configured_local_endpoint(self, boto_client):
+        with patch.dict(
+            os.environ,
+            {"PR_TO_SKILL_AWS_ENDPOINT_URL": "http://localhost:4566"},
+            clear=True,
+        ):
+            aws_runtime.aws_client("sqs")
+
+        boto_client.assert_called_once_with(
+            "sqs", endpoint_url="http://localhost:4566"
+        )
+
+    @patch("aws_runtime.boto3.client")
+    def test_aws_client_preserves_default_aws_resolution(self, boto_client):
+        with patch.dict(os.environ, {}, clear=True):
+            aws_runtime.aws_client("s3")
+
+        boto_client.assert_called_once_with("s3")
+
+    @patch("aws_runtime.boto3.resource")
+    def test_aws_resource_uses_configured_local_endpoint(self, boto_resource):
+        with patch.dict(
+            os.environ,
+            {"PR_TO_SKILL_AWS_ENDPOINT_URL": "http://localhost:4566"},
+            clear=True,
+        ):
+            aws_runtime.aws_resource("dynamodb")
+
+        boto_resource.assert_called_once_with(
+            "dynamodb", endpoint_url="http://localhost:4566"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

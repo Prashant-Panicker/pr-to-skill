@@ -1,0 +1,23 @@
+services:
+  localstack:
+    container_name: pr-to-skill-localstack
+    image: ${LOCALSTACK_IMAGE:-centraluhg.jfrog.io/glb-docker-hub-rem-cache/localstack/localstack:4.1.0}
+    environment:
+      DEBUG: "0"
+      DEFAULT_REGION: us-east-1
+      GATEWAY_LISTEN: 0.0.0.0:4566
+      PERSISTENCE: "0"
+      SERVICES: ${LOCALSTACK_SERVICES:-s3,sqs,dynamodb,secretsmanager}
+    ports:
+      - "127.0.0.1:4566:4566"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - pr-to-skill-localstack:/var/lib/localstack
+
+volumes:
+  pr-to-skill-localstack:

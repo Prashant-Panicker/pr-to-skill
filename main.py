@@ -190,13 +190,13 @@ def main():
     print(f"      Wrote {skill_path}")
 
     if args.sync_aws_artifacts:
-        import boto3
+        from aws_runtime import aws_client
 
         bucket = os.environ.get("ARTIFACT_BUCKET")
         if not bucket:
             parser.error("--sync-aws-artifacts requires ARTIFACT_BUCKET")
         artifacts = S3ArtifactStore(
-            boto3.client("s3"), bucket, os.environ.get("ARTIFACT_PREFIX", "artifacts")
+            aws_client("s3"), bucket, os.environ.get("ARTIFACT_PREFIX", "artifacts")
         )
         for name, path in (
             ("raw_comments.json", raw_path),

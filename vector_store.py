@@ -2,11 +2,19 @@
 
 import hashlib
 import os
+from urllib.parse import urlparse
 
 import boto3
 from opensearchpy import AWSV4SignerAuth, OpenSearch, RequestsHttpConnection
 
 from application_ports import ModelClient
+
+
+def _boolean_setting(env: dict[str, str], name: str, default: str) -> bool:
+    value = env.get(name, default).lower()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
 
 
 def resolve_config(
@@ -36,20 +44,42 @@ def resolve_config(
             raise ValueError(f"AWS OpenSearch requires: {', '.join(missing)}")
         if embedding_dimensions <= 0:
             raise ValueError("embedding_dimensions must be positive")
-        resolved["endpoint"] = resolved["endpoint"].replace("https://", "").rstrip("/")
+        endpoint = resolved["endpoint"]
+        parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("AWS OpenSearch endpoint must use http or https")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("AWS OpenSearch endpoint must not include credentials or parameters")
+        if parsed.path not in {"", "/"}:
+            raise ValueError("AWS OpenSearch endpoint must not include a path")
+        resolved.update({
+            "host": parsed.hostname,
+            "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+            "use_ssl": parsed.scheme == "https",
+            "verify_certs": _boolean_setting(
+                env, "AWS_OPENSEARCH_VERIFY_CERTS", "true"
+            ),
+            "sign_requests": _boolean_setting(
+                env, "AWS_OPENSEARCH_SIGN_REQUESTS", "true"
+            ),
+        })
+        if not resolved["host"]:
+            raise ValueError("AWS OpenSearch endpoint must include a host")
     return resolved
 
 
 def create_store(config: dict, embedding_client: ModelClient):
-    credentials = boto3.Session().get_credentials()
-    if credentials is None:
-        raise ValueError("AWS credentials are required for OpenSearch")
-    auth = AWSV4SignerAuth(credentials, config["region"], config["service"])
+    auth = None
+    if config["sign_requests"]:
+        credentials = boto3.Session().get_credentials()
+        if credentials is None:
+            raise ValueError("AWS credentials are required for OpenSearch")
+        auth = AWSV4SignerAuth(credentials, config["region"], config["service"])
     search_client = OpenSearch(
-        hosts=[{"host": config["endpoint"], "port": 443}],
+        hosts=[{"host": config["host"], "port": config["port"]}],
         http_auth=auth,
-        use_ssl=True,
-        verify_certs=True,
+        use_ssl=config["use_ssl"],
+        verify_certs=config["verify_certs"],
         connection_class=RequestsHttpConnection,
         timeout=60,
         max_retries=2,

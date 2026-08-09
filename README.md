@@ -78,6 +78,80 @@ python main.py --config config.yaml --skip-collect
 python main.py --config config.yaml --skip-analyze
 ```
 
+## Local AWS resources
+
+The supported AWS dependencies can run in LocalStack while model and embedding
+calls continue to use your real Azure Foundry deployment. This path is useful
+while AWS account provisioning is pending. It follows the approved local
+convention of Podman, LocalStack 4.1.0, loopback-only ports, region
+`us-east-1`, and non-secret `test` credentials.
+
+Start Podman and LocalStack:
+
+```bash
+podman machine start
+podman pull centraluhg.jfrog.io/glb-docker-hub-rem-cache/localstack/localstack:4.1.0
+make local-up
+curl --fail --silent --show-error http://localhost:4566/_localstack/health
+```
+
+If the JFrog cache does not contain the pinned image, use the official image
+for that invocation:
+
+```bash
+podman pull docker.io/localstack/localstack:4.1.0
+LOCALSTACK_IMAGE=docker.io/localstack/localstack:4.1.0 make local-up
+```
+
+Load your existing ignored `.env` first. The bootstrap stores any configured
+`GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_PRIVATE_KEY`, and
+`AZURE_OPENAI_API_KEY` directly in LocalStack Secrets Manager; it does not
+write secret values to the generated file. An Azure key is optional when your
+Foundry deployment accepts the active `az login` identity.
+
+```bash
+set -a; source .env; set +a
+make local-bootstrap
+set -a; source .env.localstack; set +a
+```
+
+The default bootstrap creates an S3 artifact bucket, DynamoDB delivery table,
+two SQS work queues and their dead-letter queue, and optional Secrets Manager
+values. It deliberately leaves OpenSearch disabled because the local engine is
+resource intensive. Batch mining, skill generation, and S3 synchronization do
+not require the vector index.
+
+Run the batch pipeline and copy its canonical outputs to local S3 while
+continuing to use Azure Foundry:
+
+```bash
+python main.py --config config.yaml --sync-aws-artifacts
+```
+
+Local OpenSearch is an explicit, resource-intensive opt-in. It substitutes a
+regular OpenSearch domain for AOSS and does not prove Serverless behavior. Only
+enable it on a machine with sufficient memory and after stopping other heavy
+workloads:
+
+```bash
+LOCALSTACK_SERVICES=s3,sqs,dynamodb,secretsmanager,opensearch make local-up
+PR_TO_SKILL_LOCAL_OPENSEARCH=true make local-bootstrap
+```
+
+Stop LocalStack without removing its named volume:
+
+```bash
+make local-down
+```
+
+This setup currently runs the batch process and AWS adapters in the host Python
+process. It provisions queues for adapter and event-flow testing, but does not
+deploy the SAM Lambda/API Gateway resources. That deployment requires SAM CLI
+packaging plus a local template that substitutes a regular OpenSearch domain
+for the production AOSS collection. LocalStack also does not prove production
+IAM enforcement, networking, scaling, quotas, X-Ray behavior, or exact AOSS
+semantics; those remain AWS sandbox checks.
+
 Enable `aws_opensearch` in the config and use an AWS profile with OpenSearch
 data access to index and retrieve review notes:
 
@@ -185,6 +259,9 @@ GitHub Environment values unless replacing the template's wiring.
 | `AWS_OPENSEARCH_ENDPOINT` | OpenSearch Serverless collection endpoint |
 | `AWS_OPENSEARCH_INDEX` | Defaults to `pr-review-notes` |
 | `AWS_OPENSEARCH_SERVICE` | `aoss` for Serverless |
+| `AWS_OPENSEARCH_SIGN_REQUESTS` | Defaults to `true`; use `false` for unsigned local OpenSearch |
+| `AWS_OPENSEARCH_VERIFY_CERTS` | Defaults to `true`; use `false` only for local HTTP/testing |
+| `PR_TO_SKILL_AWS_ENDPOINT_URL` | Optional boto3 endpoint override; use `http://localhost:4566` for host-run LocalStack |
 | `AWS_REGION` | Lambda-provided AWS region |
 | `PR_TO_SKILL_CONFIG` | Packaged YAML path, defaults to `config.example.yaml` |
 | `PR_TO_SKILL_OPENAI_TIMEOUT` | Per-request cap, maximum `600` seconds |

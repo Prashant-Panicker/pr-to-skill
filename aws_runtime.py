@@ -20,9 +20,23 @@ from github_collector import GitHubReviewPublisher
 from incremental_pipeline import IncrementalPipeline
 
 
+def aws_client(service_name: str):
+    endpoint_url = os.environ.get("PR_TO_SKILL_AWS_ENDPOINT_URL")
+    if endpoint_url:
+        return boto3.client(service_name, endpoint_url=endpoint_url)
+    return boto3.client(service_name)
+
+
+def aws_resource(service_name: str):
+    endpoint_url = os.environ.get("PR_TO_SKILL_AWS_ENDPOINT_URL")
+    if endpoint_url:
+        return boto3.resource(service_name, endpoint_url=endpoint_url)
+    return boto3.resource(service_name)
+
+
 @lru_cache(maxsize=None)
 def load_secret(secret_id: str) -> str:
-    response = boto3.client("secretsmanager").get_secret_value(SecretId=secret_id)
+    response = aws_client("secretsmanager").get_secret_value(SecretId=secret_id)
     value = response.get("SecretString")
     if not value:
         raise ValueError(f"Secret {secret_id!r} must contain a string value")
@@ -58,7 +72,7 @@ def load_config() -> dict:
 
 @lru_cache(maxsize=1)
 def build_job_publisher() -> RoutedSqsJobPublisher:
-    client = boto3.client("sqs")
+    client = aws_client("sqs")
     return RoutedSqsJobPublisher({
         "review": SqsJobPublisher(client, os.environ["REVIEW_QUEUE_URL"]),
         "mining": SqsJobPublisher(client, os.environ["MINING_QUEUE_URL"]),
@@ -98,11 +112,11 @@ def build_event_processor(work_type: str) -> EventProcessor:
     )
     store = vector_store.create_store(search_config, client)
     artifacts = S3ArtifactStore(
-        boto3.client("s3"), os.environ["ARTIFACT_BUCKET"],
+        aws_client("s3"), os.environ["ARTIFACT_BUCKET"],
         os.environ.get("ARTIFACT_PREFIX", "artifacts"),
     )
     delivery_store = DynamoDeliveryStore(
-        boto3.resource("dynamodb").Table(os.environ["DELIVERY_TABLE"])
+        aws_resource("dynamodb").Table(os.environ["DELIVERY_TABLE"])
     )
     pipeline = IncrementalPipeline(
         client,

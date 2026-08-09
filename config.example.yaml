@@ -44,7 +44,10 @@ azure_openai:
 
 aws_opensearch:
   # Optional Amazon OpenSearch Serverless vector index. AWS requests are
-  # signed with the active IAM role or local AWS profile.
+  # signed with the active IAM role or local AWS profile. For LocalStack, keep
+  # this disabled unless explicitly testing its resource-intensive regular
+  # OpenSearch substitute; the bootstrap-generated .env.localstack supplies
+  # the local endpoint and unsigned HTTP transport settings when enabled.
   enabled: false                         # override: AWS_OPENSEARCH_ENABLED
   endpoint: "https://your-collection.region.aoss.amazonaws.com"
   index_name: "pr-review-notes"          # override: AWS_OPENSEARCH_INDEX
