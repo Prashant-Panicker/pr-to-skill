@@ -52,6 +52,8 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp config.example.yaml config.yaml
+cp .env.example .env
+set -a; source .env; set +a
 gh auth login
 ```
 
@@ -64,6 +66,9 @@ the sometimes-omitted per-file `patch` fields. Diffs above 500,000 characters
 fail explicitly instead of being silently truncated.
 Historical collection uses the authenticated `gh` CLI. Azure Foundry accepts
 either `AZURE_OPENAI_API_KEY` or `DefaultAzureCredential` (`az login`) locally.
+The application does not load `.env` automatically. Leave
+`AWS_OPENSEARCH_ENABLED=false` for mining and skill generation without vector
+storage; enable it only after configuring an AWS profile and collection.
 
 Run the batch pipeline:
 
