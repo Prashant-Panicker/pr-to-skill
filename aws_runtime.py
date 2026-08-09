@@ -9,8 +9,14 @@ import yaml
 
 import azure_client
 import vector_store
-from aws_adapters import DynamoDeliveryStore, S3ArtifactStore, SqsJobPublisher
+from aws_adapters import (
+    DynamoDeliveryStore,
+    RoutedSqsJobPublisher,
+    S3ArtifactStore,
+    SqsJobPublisher,
+)
 from event_processor import EventProcessor
+from github_collector import GitHubReviewPublisher
 from incremental_pipeline import IncrementalPipeline
 
 
@@ -40,21 +46,29 @@ def load_config() -> dict:
     with open(config_path) as source:
         config = yaml.safe_load(source)
     configured_repo = os.environ.get("PR_TO_SKILL_REPO")
-    configured_reviewer = os.environ.get("PR_TO_SKILL_REVIEWER")
+    configured_reviewers = os.environ.get("PR_TO_SKILL_REVIEWERS")
     if configured_repo:
         config["repos"] = [configured_repo]
-    if configured_reviewer:
-        config["person"]["github_username"] = configured_reviewer
+    if configured_reviewers:
+        config["person"]["github_usernames"] = [
+            value.strip() for value in configured_reviewers.split(",") if value.strip()
+        ]
     return config
 
 
 @lru_cache(maxsize=1)
-def build_job_publisher() -> SqsJobPublisher:
-    return SqsJobPublisher(boto3.client("sqs"), os.environ["EVENT_QUEUE_URL"])
+def build_job_publisher() -> RoutedSqsJobPublisher:
+    client = boto3.client("sqs")
+    return RoutedSqsJobPublisher({
+        "review": SqsJobPublisher(client, os.environ["REVIEW_QUEUE_URL"]),
+        "mining": SqsJobPublisher(client, os.environ["MINING_QUEUE_URL"]),
+    })
 
 
-@lru_cache(maxsize=1)
-def build_event_processor() -> EventProcessor:
+@lru_cache(maxsize=2)
+def build_event_processor(work_type: str) -> EventProcessor:
+    if work_type not in {"review", "mining"}:
+        raise ValueError(f"Unsupported worker type: {work_type!r}")
     configure_runtime_secrets()
     config = load_config()
     repos = config.get("repos", [])
@@ -97,12 +111,16 @@ def build_event_processor() -> EventProcessor:
         config,
         artifact_store=artifacts,
         reconciliation_lock=delivery_store,
+        review_publisher=GitHubReviewPublisher(),
         deadline_seconds=workflow_deadline,
     )
-    return EventProcessor(pipeline, delivery_store, repos[0])
+    return EventProcessor(
+        pipeline, delivery_store, repos[0], allowed_work_types={work_type}
+    )
 
 
 def bootstrap_payload(raw_comments: list[dict], notes: list[dict]) -> str:
     return json.dumps(
-        {"version": 1, "raw_comments": raw_comments, "notes": notes}, indent=2
+        {"version": 2, "raw_comments": raw_comments, "notes": notes,
+         "pending_prs": []}, indent=2
     )

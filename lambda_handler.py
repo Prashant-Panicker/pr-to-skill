@@ -44,9 +44,8 @@ def webhook(event, context):
     return {"statusCode": 202, "body": ""}
 
 
-def process_events(event, context):
-    del context
-    processor = build_event_processor()
+def _process_events(event, work_type: str):
+    processor = build_event_processor(work_type)
     failures = []
     for record in event.get("Records", []):
         try:
@@ -55,3 +54,13 @@ def process_events(event, context):
             logger.exception("Failed to process SQS message %s", record["messageId"])
             failures.append({"itemIdentifier": record["messageId"]})
     return {"batchItemFailures": failures}
+
+
+def process_reviews(event, context):
+    del context
+    return _process_events(event, "review")
+
+
+def process_mining(event, context):
+    del context
+    return _process_events(event, "mining")

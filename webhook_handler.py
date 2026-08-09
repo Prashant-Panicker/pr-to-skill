@@ -6,9 +6,11 @@ import json
 
 
 ANALYSIS_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
+MINING_PULL_REQUEST_ACTIONS = {"closed", "edited"}
 HISTORY_EVENTS = {
     "pull_request_review": {"submitted", "edited", "dismissed"},
     "pull_request_review_comment": {"created", "edited", "deleted"},
+    "issue_comment": {"created", "edited", "deleted"},
 }
 
 
@@ -25,14 +27,23 @@ def route_delivery(delivery_id: str, event: str, body: bytes) -> dict | None:
     payload = json.loads(body)
     action = payload.get("action")
     if event == "pull_request" and action in ANALYSIS_ACTIONS:
-        work_type = "analysis"
-    elif action in HISTORY_EVENTS.get(event, set()):
-        work_type = "history"
+        work_type = "review"
+    elif event == "pull_request" and action in MINING_PULL_REQUEST_ACTIONS:
+        work_type = "mining"
+    elif (
+        action in HISTORY_EVENTS.get(event, set())
+        and (event != "issue_comment" or payload.get("issue", {}).get("pull_request"))
+    ):
+        work_type = "mining"
     else:
         return None
     repository = payload.get("repository", {}).get("full_name")
     pull_request = payload.get("pull_request", {})
-    pr_number = pull_request.get("number") or payload.get("number")
+    pr_number = (
+        pull_request.get("number")
+        or payload.get("issue", {}).get("number")
+        or payload.get("number")
+    )
     if not repository or not isinstance(pr_number, int):
         raise ValueError("Webhook repository and pull request number are required")
     return {

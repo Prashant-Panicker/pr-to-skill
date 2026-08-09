@@ -16,7 +16,7 @@ class EventProcessorTests(unittest.TestCase):
         processor = EventProcessor(pipeline, receipts, "org/repo")
 
         result = processor.process({
-            "version": 1, "delivery_id": "delivery-1", "work_type": "analysis",
+            "version": 1, "delivery_id": "delivery-1", "work_type": "review",
             "repo": "org/repo", "pr_number": 12,
         })
 
@@ -33,12 +33,12 @@ class EventProcessorTests(unittest.TestCase):
         processor = EventProcessor(pipeline, receipts, "org/repo")
 
         result = processor.process({
-            "version": 1, "delivery_id": "delivery-1", "work_type": "history",
+            "version": 1, "delivery_id": "delivery-1", "work_type": "mining",
             "repo": "org/repo", "pr_number": 12,
         })
 
         self.assertIsNone(result)
-        pipeline.reconcile_feedback.assert_not_called()
+        pipeline.mine_pull_request.assert_not_called()
         receipts.mark_completed.assert_not_called()
 
     def test_does_not_complete_delivery_after_lease_loss(self):
@@ -52,7 +52,7 @@ class EventProcessorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "lease lost"):
             processor.process({
-                "version": 1, "delivery_id": "delivery-1", "work_type": "history",
+                "version": 1, "delivery_id": "delivery-1", "work_type": "mining",
                 "repo": "org/repo", "pr_number": 12,
             })
 
@@ -63,8 +63,22 @@ class EventProcessorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "not configured"):
             processor.process({
-                "version": 1, "delivery_id": "delivery-1", "work_type": "analysis",
+                "version": 1, "delivery_id": "delivery-1", "work_type": "review",
                 "repo": "other/repo", "pr_number": 12,
+            })
+
+    def test_review_worker_rejects_mining_job(self):
+        receipts = Mock()
+        receipts.lock.return_value = nullcontext(Mock())
+        receipts.is_completed.return_value = False
+        processor = EventProcessor(
+            Mock(), receipts, "org/repo", allowed_work_types={"review"}
+        )
+
+        with self.assertRaisesRegex(ValueError, "not allowed"):
+            processor.process({
+                "version": 1, "delivery_id": "delivery-1", "work_type": "mining",
+                "repo": "org/repo", "pr_number": 12,
             })
 
 

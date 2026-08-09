@@ -8,12 +8,10 @@
 # variables — see .env.example — rather than being written into this file.
 
 person:
-  # GitHub login (this is the primary matching key - GitHub comments carry
-  # user.login, not email, so this is what actually filters the data).
-  github_username: "your-github-login"
-  # Kept for record-keeping / cross-checking against commit authorship if you
-  # ever extend the collector to also mine commit messages.
-  email: "you@example.com"
+  # Only root comments from these trusted reviewers can become guidance.
+  # Replies in their review threads may be authored by anyone.
+  github_usernames:
+    - "your-github-login"
 
 repos:
   - "your-org/your-repo"

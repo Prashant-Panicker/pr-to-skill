@@ -14,15 +14,22 @@ Serverless.
 ```text
 GitHub webhook
   -> API Gateway -> webhook Lambda (raw-body HMAC verification)
-  -> SQS -> worker Lambda
+  -> review SQS -> review Lambda
        pull_request opened/reopened/synchronize/ready_for_review
          -> retrieve repository-scoped OpenSearch evidence
-         -> generate an advisory review with Azure Foundry
-         -> save reviews/pr-<number>.md in S3
+         -> generate a review with Azure Foundry
+         -> save it in S3 and post a GitHub review for the verified head SHA
+  -> mining SQS -> mining Lambda
        pull_request_review submitted/edited/dismissed
        pull_request_review_comment created/edited/deleted
-         -> refetch the PR's complete feedback
+      issue_comment created/edited/deleted on a pull request
+       pull_request closed
+         -> remember open PRs, but mine only after merge
+         -> select trusted-reviewer root comments and include all thread replies
+         -> verify requested changes against the final merged diff
+         -> let Azure Foundry select durable guidance and examples
          -> replace/delete notes by stable GitHub ID
+         -> delete older architecture notes when an accepted change supersedes them
          -> update OpenSearch vectors
          -> regenerate notes.json and SKILL.md in S3
 ```
@@ -32,9 +39,9 @@ are confined to `aws_adapters.py`, `aws_runtime.py`, and `lambda_handler.py`;
 Azure SDK types are confined to the Foundry client and authentication adapter.
 
 Completed GitHub delivery IDs and expiring workflow locks are stored in
-DynamoDB. SQS retries failed deliveries and sends a message to the DLQ after
-five receives. Generated reviews are artifacts only and are not posted to
-GitHub because GitHub and AWS state cannot be committed atomically.
+DynamoDB. Each SQS queue retries failed deliveries and sends a message to the
+DLQ after five receives. Posted reviews carry a hidden head-SHA marker, so a
+retry does not post the same review twice.
 
 ## Local setup
 
@@ -48,7 +55,13 @@ cp config.example.yaml config.yaml
 gh auth login
 ```
 
-Set `person.github_username` and `repos` in the git-ignored `config.yaml`.
+Set `person.github_usernames` and `repos` in the git-ignored `config.yaml`.
+Only root feedback from those users is eligible for mining; replies in their
+threads may be from any GitHub user. Unmerged and AI-rejected guidance remains
+out of both the vector index and generated skill.
+Implementation checks use GitHub's complete merged diff representation, not
+the sometimes-omitted per-file `patch` fields. Diffs above 500,000 characters
+fail explicitly instead of being silently truncated.
 Historical collection uses the authenticated `gh` CLI. Azure Foundry accepts
 either `AZURE_OPENAI_API_KEY` or `DefaultAzureCredential` (`az login`) locally.
 
@@ -66,6 +79,10 @@ data access to index and retrieve review notes:
 ```bash
 python main.py --config config.yaml --search "missing authorization check"
 ```
+
+A full batch run assesses every merged PR for architecture decisions, applies
+merge-ordered supersession, upserts the complete selected set, and deletes
+stale vectors. This converges bootstrap state with incremental mining.
 
 Before enabling webhooks for an existing history set, bootstrap the canonical
 artifacts into the deployed S3 bucket:
@@ -103,7 +120,7 @@ then configure the following Environment variables and secrets.
 | `AWS_STACK_NAME` | Yes | `pr-to-skill-stage` |
 | `AWS_SAM_S3_PREFIX` | No | `pr-to-skill/stage`; defaults to this value |
 | `PR_TO_SKILL_REPO` | Yes | One repository, such as `org/repo` |
-| `PR_TO_SKILL_REVIEWER` | Yes | Trusted reviewer's GitHub login |
+| `PR_TO_SKILL_REVIEWERS` | Yes | Comma-separated trusted GitHub logins, such as `alice,bob` |
 | `GH_APP_ID` | Yes | GitHub App ID |
 | `GH_INSTALLATION_ID` | Yes | App installation ID for the repository |
 | `GH_WEBHOOK_SECRET_ID` | Yes | Secrets Manager name, such as `pr-to-skill/stage/github-webhook` |
@@ -141,8 +158,11 @@ that URL in the GitHub App, set the same webhook secret, and subscribe to:
 - Pull requests
 - Pull request reviews
 - Pull request review comments
+- Issue comments
 
-The GitHub App needs Metadata read, Contents read, and Pull requests read.
+The GitHub App needs Metadata read, Contents read, Issues read, and Pull requests
+**write**. Issues read supplies PR conversation comments; Pull requests write
+allows the review worker to post generated reviews.
 
 ## Runtime environment
 
@@ -154,7 +174,8 @@ GitHub Environment values unless replacing the template's wiring.
 | --- | --- |
 | `ARTIFACT_BUCKET`, `ARTIFACT_PREFIX` | S3 artifact location; prefix defaults to `artifacts` |
 | `DELIVERY_TABLE` | DynamoDB receipt and lock table |
-| `EVENT_QUEUE_URL` | SQS URL used by webhook Lambda |
+| `REVIEW_QUEUE_URL`, `MINING_QUEUE_URL` | SQS URLs used by webhook Lambda |
+| `PR_TO_SKILL_REVIEWERS` | Comma-separated trusted reviewer logins |
 | `AWS_OPENSEARCH_ENABLED` | Must be `true` in the worker |
 | `AWS_OPENSEARCH_ENDPOINT` | OpenSearch Serverless collection endpoint |
 | `AWS_OPENSEARCH_INDEX` | Defaults to `pr-review-notes` |
@@ -169,6 +190,7 @@ GitHub Environment values unless replacing the template's wiring.
 ## Output
 
 - `output/raw_comments.json`: normalized historical feedback.
+- `output/merged_pull_requests.json`: merged PR metadata and complete diffs.
 - `output/notes.json` and `output/notes.md`: AI-annotated review guidance.
 - `output/SKILL.md`: consolidated review skill.
 - `s3://<artifact-bucket>/artifacts/reviews/pr-<number>.md`: generated review.
@@ -176,8 +198,8 @@ GitHub Environment values unless replacing the template's wiring.
 
 ## Limitations
 
-- The deployed demo supports exactly one repository and one trusted reviewer.
-- Worker reserved concurrency is one. Cross-service S3, DynamoDB, OpenSearch,
+- The deployed demo supports exactly one repository and multiple trusted reviewers.
+- Each worker's reserved concurrency is one. Cross-service S3, DynamoDB, OpenSearch,
   and GitHub operations are not a transaction; production scale-out needs a
   stronger workflow/fencing model.
 - The OpenSearch Serverless network policy allows the public collection

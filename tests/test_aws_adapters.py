@@ -2,7 +2,12 @@ import io
 import unittest
 from unittest.mock import Mock
 
-from aws_adapters import DynamoDeliveryStore, S3ArtifactStore, SqsJobPublisher
+from aws_adapters import (
+    DynamoDeliveryStore,
+    RoutedSqsJobPublisher,
+    S3ArtifactStore,
+    SqsJobPublisher,
+)
 
 
 class AwsAdapterTests(unittest.TestCase):
@@ -24,12 +29,22 @@ class AwsAdapterTests(unittest.TestCase):
         client = Mock()
         publisher = SqsJobPublisher(client, "queue-url")
 
-        publisher.publish({"version": 1, "work_type": "analysis"})
+        publisher.publish({"version": 1, "work_type": "review"})
 
         self.assertEqual(client.send_message.call_args.kwargs, {
             "QueueUrl": "queue-url",
-            "MessageBody": '{"version":1,"work_type":"analysis"}',
+            "MessageBody": '{"version":1,"work_type":"review"}',
         })
+
+    def test_routed_publisher_selects_worker_queue(self):
+        review = Mock()
+        mining = Mock()
+        publisher = RoutedSqsJobPublisher({"review": review, "mining": mining})
+
+        publisher.publish({"version": 1, "work_type": "mining"})
+
+        mining.publish.assert_called_once_with({"version": 1, "work_type": "mining"})
+        review.publish.assert_not_called()
 
     def test_dynamo_delivery_store_claims_and_releases_owned_lock(self):
         table = Mock()

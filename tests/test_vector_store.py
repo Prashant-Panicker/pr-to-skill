@@ -13,6 +13,7 @@ def note():
         "original_issue": "Input was trusted.",
         "requested_change": "Validate the input.",
         "rationale": "Untrusted data must be rejected.",
+        "reviewer": "reviewer",
     }
 
 
@@ -45,7 +46,7 @@ class VectorStoreTests(unittest.TestCase):
         embedding_client.embed.return_value = [[0.1, 0.2]]
         store = store_for(search_client, embedding_client)
 
-        count = store.save_notes([note()], "reviewer")
+        count = store.save_notes([note()])
 
         self.assertEqual(count, 1)
         body = search_client.bulk.call_args.kwargs["body"]
@@ -62,7 +63,7 @@ class VectorStoreTests(unittest.TestCase):
         store = store_for(search_client, embedding_client)
 
         with self.assertRaisesRegex(RuntimeError, "rejected"):
-            store.save_notes([note()], "reviewer")
+            store.save_notes([note()])
 
     def test_search_uses_vector_and_repository_filters(self):
         search_client = Mock()
@@ -74,7 +75,8 @@ class VectorStoreTests(unittest.TestCase):
         store = store_for(search_client, embedding_client)
 
         results = store.search(
-            "authorization", "org/repo", limit=3, reviewer="reviewer"
+            "authorization", "org/repo", limit=3,
+            reviewers=["reviewer", "architect"],
         )
 
         self.assertEqual(results, [{"repo": "org/repo", "pr_number": 42}])
@@ -84,8 +86,28 @@ class VectorStoreTests(unittest.TestCase):
         self.assertEqual(knn["vector"], [0.1, 0.2])
         self.assertEqual(knn["filter"]["bool"]["filter"], [
             {"term": {"repo": "org/repo"}},
-            {"term": {"reviewer": "reviewer"}},
+            {"terms": {"reviewer": ["reviewer", "architect"]}},
         ])
+
+    def test_replace_notes_deletes_repository_scope_before_saving(self):
+        search_client = Mock()
+        search_client.delete_by_query.return_value = {"failures": []}
+        search_client.bulk.return_value = {"errors": False}
+        embedding_client = Mock()
+        embedding_client.embed.return_value = [[0.1, 0.2]]
+        store = store_for(search_client, embedding_client)
+
+        count = store.replace_notes([note()], ["org/repo"])
+
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            search_client.delete_by_query.call_args.kwargs["body"],
+            {"query": {"bool": {
+                "filter": [{"terms": {"repo": ["org/repo"]}}],
+                "must_not": [{"ids": {"values": [store._id(note())]}}],
+            }}},
+        )
+        search_client.bulk.assert_called_once()
 
     def test_resolve_config_requires_vector_dependencies_when_enabled(self):
         with self.assertRaisesRegex(ValueError, "embedding_deployment"):

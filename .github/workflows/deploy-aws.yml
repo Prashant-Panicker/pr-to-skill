@@ -22,7 +22,7 @@ jobs:
       AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME }}
       AWS_SAM_S3_PREFIX: ${{ vars.AWS_SAM_S3_PREFIX }}
       PR_TO_SKILL_REPO: ${{ vars.PR_TO_SKILL_REPO }}
-      PR_TO_SKILL_REVIEWER: ${{ vars.PR_TO_SKILL_REVIEWER }}
+      PR_TO_SKILL_REVIEWERS: ${{ vars.PR_TO_SKILL_REVIEWERS }}
       GH_APP_ID: ${{ vars.GH_APP_ID }}
       GH_INSTALLATION_ID: ${{ vars.GH_INSTALLATION_ID }}
       GH_WEBHOOK_SECRET_ID: ${{ vars.GH_WEBHOOK_SECRET_ID }}
@@ -60,7 +60,7 @@ jobs:
           test -n "$AWS_REGION"
           test -n "$AWS_STACK_NAME"
           test -n "$PR_TO_SKILL_REPO"
-          test -n "$PR_TO_SKILL_REVIEWER"
+          test -n "$PR_TO_SKILL_REVIEWERS"
           test -n "$GH_APP_ID"
           test -n "$GH_INSTALLATION_ID"
           test -n "$GH_WEBHOOK_SECRET_ID"
@@ -111,7 +111,7 @@ jobs:
             --parameter-overrides \
               Stage=stage \
               Repository="$PR_TO_SKILL_REPO" \
-              Reviewer="$PR_TO_SKILL_REVIEWER" \
+              TrustedReviewers="$PR_TO_SKILL_REVIEWERS" \
               GitHubAppId="$GH_APP_ID" \
               GitHubInstallationId="$GH_INSTALLATION_ID" \
               GitHubWebhookSecretId="$GH_WEBHOOK_SECRET_ID" \

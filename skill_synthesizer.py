@@ -10,8 +10,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 SYSTEM_PROMPT = """You are building a reusable code-review "skill" document that \
-encodes one specific engineer's review standards, learned from hundreds of their \
-past PR review comments (each pre-tagged with category, what was wrong, what they \
+encodes trusted engineers' review standards, learned from their past PR review \
+comments (each pre-tagged with category, what was wrong, what they \
 asked for, why, and severity).
 
 Produce a Markdown skill file with this structure:
@@ -44,11 +44,12 @@ def build_synthesis_prompt(notes: list[dict], person_username: str) -> str:
             "original_issue": n["original_issue"],
             "requested_change": n["requested_change"],
             "rationale": n["rationale"],
+            "implementation_example": n.get("implementation_example", ""),
         }
         for n in notes
     ]
     return (
-        f"Engineer GitHub username: {person_username}\n"
+        f"Trusted reviewer GitHub usernames: {person_username}\n"
         f"Total review notes: {len(compact)}\n\n"
         f"Notes (JSON array):\n{json.dumps(compact, indent=1)}"
     )
@@ -97,7 +98,7 @@ def synthesize_skill(client, deployment: str, notes: list[dict], person_username
 
     # Reduce step: merge chunk summaries into the final skill file
     merge_prompt = (
-        f"Engineer GitHub username: {person_username}\n\n"
+        f"Trusted reviewer GitHub usernames: {person_username}\n\n"
         "Below are condensed pattern summaries from multiple chunks of this "
         "engineer's review history. Merge them into one final skill file, "
         "deduplicating overlapping items and following the structure described "

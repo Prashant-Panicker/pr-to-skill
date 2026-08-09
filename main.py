@@ -24,6 +24,8 @@ import yaml
 
 import github_collector as gh
 import comment_analyzer as analyzer
+from configuration import trusted_reviewers
+from knowledge_curator import curate_notes
 import skill_synthesizer as synth
 import azure_client
 import vector_store
@@ -76,7 +78,7 @@ def main():
             args.search,
             search_repo,
             limit=args.search_limit,
-            reviewer=cfg["person"]["github_username"],
+            reviewers=trusted_reviewers(cfg),
         )
         print(json.dumps(results, indent=2))
         return
@@ -84,33 +86,43 @@ def main():
     out_dir = cfg["output"]["dir"]
     os.makedirs(out_dir, exist_ok=True)
 
-    username = cfg["person"]["github_username"]
+    reviewers = trusted_reviewers(cfg)
     repos = cfg["repos"]
     updated_after = cfg.get("github", {}).get("updated_after")
 
     raw_path = os.path.join(out_dir, "raw_comments.json")
+    merged_prs_path = os.path.join(out_dir, "merged_pull_requests.json")
     notes_json_path = os.path.join(out_dir, "notes.json")
     notes_md_path = os.path.join(out_dir, "notes.md")
     skill_path = os.path.join(out_dir, "SKILL.md")
 
     # --- Stage 1: collect ---
-    if args.skip_collect and os.path.exists(raw_path):
+    if (
+        args.skip_collect
+        and os.path.exists(raw_path)
+        and os.path.exists(merged_prs_path)
+    ):
         print(f"[1/3] Skipping collection, reusing {raw_path}")
         with open(raw_path) as f:
             raw_comments = json.load(f)
+        with open(merged_prs_path) as f:
+            merged_pull_requests = json.load(f)
     else:
-        print(f"[1/3] Collecting closed-PR comments by '{username}' across {len(repos)} repos...")
+        print(f"[1/3] Collecting merged-PR comments by {', '.join(reviewers)} across {len(repos)} repos...")
         collection_workers = cfg.get("github", {}).get("workers", 8)
         comments = gh.collect_all(
-            repos, username, updated_after, max_workers=collection_workers
+            repos, reviewers, updated_after, max_workers=collection_workers
         )
         gh.save_raw(comments, raw_path)
+        merged_pull_requests = gh.collect_merged_pull_requests(repos, updated_after)
+        with open(merged_prs_path, "w") as output:
+            json.dump(merged_pull_requests, output, indent=2)
         with open(raw_path) as f:
             raw_comments = json.load(f)
         print(f"      Found {len(raw_comments)} comments. Saved to {raw_path}")
 
-    if not raw_comments:
-        print("No comments found for this person in these repos. Nothing to analyze.", file=sys.stderr)
+    if not raw_comments and not merged_pull_requests:
+        print("No merged pull-request evidence found. Nothing to analyze.", file=sys.stderr)
         sys.exit(1)
 
     # --- Set up Azure OpenAI client ---
@@ -141,10 +153,11 @@ def main():
         def progress_cb(done, total):
             print(f"      ...{done}/{total}")
 
-        note_objs = analyzer.analyze_all(
+        note_objs = analyzer.analyze_history(
             client,
             deployment,
             raw_comments,
+            merged_pull_requests,
             batch_size=batch_size,
             max_attempts=max_attempts,
             max_workers=analysis_workers,
@@ -156,19 +169,20 @@ def main():
             notes = json.load(f)
         print(f"      Wrote {notes_json_path} and {notes_md_path}")
 
+    curated_notes = curate_notes(notes)
     if search_cfg["enabled"]:
         store = vector_store.create_store(search_cfg, client)
-        indexed_count = store.save_notes(notes, username)
+        indexed_count = store.replace_notes(curated_notes, repos)
         print(f"      Indexed {indexed_count} notes in Amazon OpenSearch")
 
     # --- Stage 3: synthesize the skill ---
-    print(f"[3/3] Synthesizing SKILL.md from {len(notes)} notes...")
+    print(f"[3/3] Synthesizing SKILL.md from {len(curated_notes)} selected notes...")
     synthesis_cfg = cfg.get("synthesis", {})
     skill_md = synth.synthesize_skill(
         client,
         deployment,
-        notes,
-        username,
+        curated_notes,
+        ", ".join(reviewers),
         max_notes_per_call=synthesis_cfg.get("max_notes_per_call", 400),
         max_workers=synthesis_cfg.get("workers", 4),
     )
@@ -186,6 +200,7 @@ def main():
         )
         for name, path in (
             ("raw_comments.json", raw_path),
+            ("merged_pull_requests.json", merged_prs_path),
             ("notes.json", notes_json_path),
             ("SKILL.md", skill_path),
         ):
@@ -193,7 +208,12 @@ def main():
                 artifacts.write_text(name, source.read())
         artifacts.write_text(
             "pipeline_state.json",
-            json.dumps({"version": 1, "raw_comments": raw_comments, "notes": notes}, indent=2),
+            json.dumps({
+                "version": 2,
+                "raw_comments": raw_comments,
+                "notes": curated_notes,
+                "pending_prs": [],
+            }, indent=2),
         )
         print("      Bootstrapped webhook artifacts in Amazon S3")
 

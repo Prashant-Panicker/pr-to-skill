@@ -38,7 +38,7 @@ class LambdaHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 202)
         publisher.publish.assert_called_once()
-        self.assertEqual(publisher.publish.call_args.args[0]["work_type"], "analysis")
+        self.assertEqual(publisher.publish.call_args.args[0]["work_type"], "review")
 
     @patch("lambda_handler.configure_runtime_secrets")
     @patch("lambda_handler.build_job_publisher")
@@ -65,9 +65,10 @@ class LambdaHandlerTests(unittest.TestCase):
             {"messageId": "two", "body": json.dumps({"version": 1})},
         ]}
 
-        response = lambda_handler.process_events(event, None)
+        response = lambda_handler.process_mining(event, None)
 
         self.assertEqual(response, {"batchItemFailures": [{"itemIdentifier": "two"}]})
+        build_processor.assert_called_once_with("mining")
 
 
 if __name__ == "__main__":

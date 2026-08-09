@@ -36,6 +36,7 @@ _TRANSIENT_GH_ERROR_MARKERS = (
     "status 503",
     "status 504",
 )
+MAX_FINAL_DIFF_CHARS = 500_000
 
 
 def _parse_json_documents(text: str) -> list[list | dict]:
@@ -226,15 +227,19 @@ class RawComment:
     review_state: Optional[str]  # APPROVED / CHANGES_REQUESTED / COMMENTED, if applicable
     created_at: str
     html_url: str
+    reviewer: str
+    replies: list[dict]
+    final_diff: str
+    merged_at: str
 
 
 def list_closed_prs(repo: str, updated_after: Optional[str] = None) -> list[dict]:
-    """List all closed PRs (includes merged) for a repo, paginated."""
+    """List merged PRs for a repo; unmerged feedback cannot become guidance."""
     endpoint = f"repos/{repo}/pulls?state=closed&per_page=100&sort=updated&direction=desc"
     prs = run_gh(["api", "--paginate", endpoint])
     if updated_after:
         prs = [p for p in prs if p["updated_at"] >= updated_after]
-    return prs
+    return [pull_request for pull_request in prs if pull_request.get("merged_at")]
 
 
 def get_pull_request(repo: str, pr_number: int) -> dict:
@@ -244,6 +249,53 @@ def get_pull_request(repo: str, pr_number: int) -> dict:
 def get_pull_request_files(repo: str, pr_number: int) -> list[dict]:
     endpoint = f"repos/{repo}/pulls/{pr_number}/files?per_page=100"
     return run_gh(["api", "--paginate", endpoint])
+
+
+def get_pull_request_diff(repo: str, pr_number: int) -> str:
+    endpoint = f"repos/{repo}/pulls/{pr_number}"
+    if os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_APP_ID"):
+        response = requests.get(
+            f"https://api.github.com/{endpoint}",
+            headers={
+                "Authorization": f"Bearer {_TOKEN_PROVIDER.get()}",
+                "Accept": "application/vnd.github.diff",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        diff = response.text
+    else:
+        result = subprocess.run(
+            ["gh", "api", "-H", "Accept: application/vnd.github.diff", endpoint],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"gh command failed while fetching PR diff: {result.stderr}")
+        diff = result.stdout
+    if not diff.strip():
+        raise ValueError(f"GitHub returned an empty final diff for {repo} PR #{pr_number}")
+    if len(diff) > MAX_FINAL_DIFF_CHARS:
+        raise ValueError(
+            f"Final diff for {repo} PR #{pr_number} is {len(diff)} characters; "
+            f"maximum supported is {MAX_FINAL_DIFF_CHARS}"
+        )
+    return diff
+
+
+class GitHubReviewPublisher:
+    def publish(self, repo: str, pr_number: int, body: str, head_sha: str) -> str:
+        marker = f"<!-- pr-to-skill:{head_sha} -->"
+        reviews = get_pr_reviews(repo, pr_number)
+        for review in reviews:
+            if marker in (review.get("body") or ""):
+                return review.get("html_url", "")
+        response = run_gh([
+            "api", "--method", "POST", f"repos/{repo}/pulls/{pr_number}/reviews",
+            "-f", f"body={body}\n\n{marker}", "-f", "event=COMMENT",
+            "-f", f"commit_id={head_sha}",
+        ])
+        return response.get("html_url", "")
 
 
 def get_pr_review_comments(repo: str, pr_number: int) -> list[dict]:
@@ -264,19 +316,55 @@ def get_pr_issue_comments(repo: str, pr_number: int) -> list[dict]:
     return run_gh(["api", "--paginate", endpoint])
 
 
-def _collect_for_pr(repo: str, username: str, pr: dict, progress_cb=None) -> list[RawComment]:
+def _trusted_usernames(usernames: str | list[str]) -> set[str]:
+    values = [usernames] if isinstance(usernames, str) else usernames
+    trusted = {value.lower() for value in values if isinstance(value, str) and value}
+    if not trusted:
+        raise ValueError("At least one trusted GitHub username is required")
+    return trusted
+
+
+def _thread_replies(root_id: int, comments_by_parent: dict[int, list[dict]]) -> list[dict]:
+    replies: list[dict] = []
+    pending = list(comments_by_parent.get(root_id, []))
+    while pending:
+        reply = pending.pop(0)
+        replies.append({
+            "github_comment_id": reply["id"],
+            "author": reply.get("user", {}).get("login", ""),
+            "body": reply.get("body", ""),
+            "created_at": reply.get("created_at", ""),
+            "html_url": reply.get("html_url", ""),
+        })
+        pending.extend(comments_by_parent.get(reply["id"], []))
+    return replies
+
+
+def _collect_for_pr(
+    repo: str, usernames: str | list[str], pr: dict, progress_cb=None
+) -> list[RawComment]:
     out: list[RawComment] = []
+    trusted = _trusted_usernames(usernames)
     pr_number = pr["number"]
     pr_title = pr.get("title", "")
     pr_url = pr.get("html_url", "")
-    pr_state = "merged" if pr.get("merged_at") else "closed"
+    merged_at = pr.get("merged_at") or ""
+    pr_state = "merged" if merged_at else pr.get("state", "open")
+    final_diff = get_pull_request_diff(repo, pr_number) if merged_at else ""
 
     if progress_cb:
         progress_cb(repo, pr_number, pr_title)
 
     # 1. Line-level review comments
-    for c in get_pr_review_comments(repo, pr_number):
-        if c.get("user", {}).get("login") != username:
+    review_comments = get_pr_review_comments(repo, pr_number)
+    comments_by_parent: dict[int, list[dict]] = {}
+    for comment in review_comments:
+        parent_id = comment.get("in_reply_to_id")
+        if parent_id is not None:
+            comments_by_parent.setdefault(parent_id, []).append(comment)
+    for c in review_comments:
+        reviewer = c.get("user", {}).get("login", "")
+        if reviewer.lower() not in trusted or c.get("in_reply_to_id") is not None:
             continue
         out.append(RawComment(
             repo=repo, pr_number=pr_number, github_comment_id=c["id"],
@@ -285,11 +373,14 @@ def _collect_for_pr(repo: str, username: str, pr: dict, progress_cb=None) -> lis
             file_path=c.get("path"), diff_hunk=c.get("diff_hunk"),
             body=c.get("body", ""), review_state=None,
             created_at=c.get("created_at", ""), html_url=c.get("html_url", ""),
+            reviewer=reviewer, replies=_thread_replies(c["id"], comments_by_parent),
+            final_diff=final_diff, merged_at=merged_at,
         ))
 
     # 2. Review summaries (the top-level "Changes requested" / "Approved" body)
     for r in get_pr_reviews(repo, pr_number):
-        if r.get("user", {}).get("login") != username:
+        reviewer = r.get("user", {}).get("login", "")
+        if reviewer.lower() not in trusted:
             continue
         if r.get("state") == "DISMISSED":
             continue
@@ -302,11 +393,13 @@ def _collect_for_pr(repo: str, username: str, pr: dict, progress_cb=None) -> lis
             file_path=None, diff_hunk=None,
             body=r.get("body", ""), review_state=r.get("state"),
             created_at=r.get("submitted_at", ""), html_url=r.get("html_url", ""),
+            reviewer=reviewer, replies=[], final_diff=final_diff, merged_at=merged_at,
         ))
 
     # 3. General conversation comments
     for c in get_pr_issue_comments(repo, pr_number):
-        if c.get("user", {}).get("login") != username:
+        reviewer = c.get("user", {}).get("login", "")
+        if reviewer.lower() not in trusted:
             continue
         out.append(RawComment(
             repo=repo, pr_number=pr_number, github_comment_id=c["id"],
@@ -315,19 +408,20 @@ def _collect_for_pr(repo: str, username: str, pr: dict, progress_cb=None) -> lis
             file_path=None, diff_hunk=None,
             body=c.get("body", ""), review_state=None,
             created_at=c.get("created_at", ""), html_url=c.get("html_url", ""),
+            reviewer=reviewer, replies=[], final_diff=final_diff, merged_at=merged_at,
         ))
 
     return out
 
 
-def collect_for_repo(repo: str, username: str, updated_after: Optional[str] = None,
+def collect_for_repo(repo: str, usernames: str | list[str], updated_after: Optional[str] = None,
                      max_workers: int = 8, progress_cb=None) -> list[RawComment]:
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
     prs = list_closed_prs(repo, updated_after)
 
     def collect(pr: dict) -> list[RawComment]:
-        return _collect_for_pr(repo, username, pr, progress_cb)
+        return _collect_for_pr(repo, usernames, pr, progress_cb)
 
     # executor.map preserves PR order even though network calls run concurrently.
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="github") as executor:
@@ -335,12 +429,14 @@ def collect_for_repo(repo: str, username: str, updated_after: Optional[str] = No
         return [comment for comments in per_pr_comments for comment in comments]
 
 
-def collect_for_pull_request(repo: str, username: str, pr_number: int) -> list[RawComment]:
+def collect_for_pull_request(
+    repo: str, usernames: str | list[str], pr_number: int
+) -> list[RawComment]:
     """Collect current review evidence for one open or closed pull request."""
-    return _collect_for_pr(repo, username, get_pull_request(repo, pr_number))
+    return _collect_for_pr(repo, usernames, get_pull_request(repo, pr_number))
 
 
-def collect_all(repos: list[str], username: str, updated_after: Optional[str] = None,
+def collect_all(repos: list[str], usernames: str | list[str], updated_after: Optional[str] = None,
                 max_workers: int = 8) -> list[RawComment]:
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
@@ -352,13 +448,26 @@ def collect_all(repos: list[str], username: str, updated_after: Optional[str] = 
         all_comments.extend(
             collect_for_repo(
                 repo,
-                username,
+                usernames,
                 updated_after,
                 max_workers=max_workers,
                 progress_cb=progress_cb,
             )
         )
     return all_comments
+
+
+def collect_merged_pull_requests(
+    repos: list[str], updated_after: Optional[str] = None
+) -> list[dict]:
+    evidence = []
+    for repo in repos:
+        for pull_request in list_closed_prs(repo, updated_after):
+            evidence.append({
+                "pull_request": pull_request,
+                "final_diff": get_pull_request_diff(repo, pull_request["number"]),
+            })
+    return evidence
 
 
 def save_raw(comments: list[RawComment], path: str):

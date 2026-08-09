@@ -99,6 +99,7 @@ class OpenSearchReviewNoteStore:
                     "file_path": {"type": "keyword"},
                     "category": {"type": "keyword"},
                     "severity": {"type": "keyword"},
+                    "merged_at": {"type": "date"},
                 }},
             })
 
@@ -109,6 +110,7 @@ class OpenSearchReviewNoteStore:
             note["requested_change"],
             note["rationale"],
             note["original_body"],
+            note.get("implementation_example", ""),
         ) if value)
 
     @staticmethod
@@ -119,7 +121,7 @@ class OpenSearchReviewNoteStore:
         identity = f'{note["repo"]}|{note["comment_type"]}|{source_identity}'
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
-    def save_notes(self, notes: list[dict], reviewer: str) -> int:
+    def save_notes(self, notes: list[dict]) -> int:
         if not notes:
             return 0
         contents = [self._content(note) for note in notes]
@@ -131,7 +133,7 @@ class OpenSearchReviewNoteStore:
                 {
                     "content": content,
                     "content_vector": vector,
-                    "reviewer": reviewer,
+                    "reviewer": note["reviewer"],
                     "repo": note["repo"],
                     "pr_number": note["pr_number"],
                     "github_comment_id": note.get("github_comment_id"),
@@ -139,6 +141,7 @@ class OpenSearchReviewNoteStore:
                     "file_path": note.get("file_path"),
                     "category": note["category"],
                     "severity": note["severity"],
+                    "merged_at": note.get("merged_at") or None,
                 },
             ))
         response = self._search_client.bulk(body=body, refresh=True)
@@ -162,8 +165,27 @@ class OpenSearchReviewNoteStore:
             raise RuntimeError("AWS OpenSearch rejected one or more note deletions")
         return len(notes)
 
+    def replace_notes(self, notes: list[dict], repos: list[str]) -> int:
+        if not repos:
+            raise ValueError("At least one repository is required for vector replacement")
+        count = self.save_notes(notes)
+        selected_ids = [self._id(note) for note in notes]
+        query: dict = {"bool": {"filter": [{"terms": {"repo": repos}}]}}
+        if selected_ids:
+            query["bool"]["must_not"] = [{"ids": {"values": selected_ids}}]
+        response = self._search_client.delete_by_query(
+            index=self._index_name,
+            body={"query": query},
+            refresh=True,
+            conflicts="proceed",
+        )
+        if response.get("failures"):
+            raise RuntimeError("AWS OpenSearch failed to clear prior review notes")
+        return count
+
     def search(
-        self, query: str, repo: str, limit: int = 5, reviewer: str | None = None
+        self, query: str, repo: str, limit: int = 5,
+        reviewers: list[str] | None = None,
     ) -> list[dict]:
         if not query.strip():
             raise ValueError("search query must not be empty")
@@ -171,8 +193,8 @@ class OpenSearchReviewNoteStore:
             raise ValueError("search limit must be at least 1")
         vector = self._embedding_client.embed(self._embedding_deployment, [query])[0]
         filters = [{"term": {"repo": repo}}]
-        if reviewer:
-            filters.append({"term": {"reviewer": reviewer}})
+        if reviewers:
+            filters.append({"terms": {"reviewer": reviewers}})
         response = self._search_client.search(index=self._index_name, body={
             "size": limit,
             "_source": [

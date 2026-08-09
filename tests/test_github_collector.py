@@ -7,6 +7,35 @@ import github_collector
 
 
 class RunGhTests(unittest.TestCase):
+    @patch("github_collector.run_gh")
+    @patch("github_collector.get_pr_reviews")
+    def test_review_publisher_skips_head_already_posted(self, get_reviews, run_gh):
+        get_reviews.return_value = [{
+            "body": "Review\n\n<!-- pr-to-skill:abc123 -->",
+            "html_url": "https://example/review/1",
+        }]
+
+        result = github_collector.GitHubReviewPublisher().publish(
+            "org/repo", 12, "Review", "abc123"
+        )
+
+        self.assertEqual(result, "https://example/review/1")
+        run_gh.assert_not_called()
+
+    @patch("github_collector.run_gh")
+    @patch("github_collector.get_pr_reviews", return_value=[])
+    def test_review_publisher_posts_comment_for_new_head(self, get_reviews, run_gh):
+        run_gh.return_value = {"html_url": "https://example/review/2"}
+
+        github_collector.GitHubReviewPublisher().publish(
+            "org/repo", 12, "Review", "abc123"
+        )
+
+        request = run_gh.call_args.args[0]
+        self.assertIn("event=COMMENT", request)
+        self.assertIn("commit_id=abc123", request)
+        self.assertTrue(any("pr-to-skill:abc123" in value for value in request))
+
     @patch.dict("github_collector.os.environ", {"GITHUB_TOKEN": "token"}, clear=True)
     @patch("github_collector._run_github_api", return_value={"number": 12})
     def test_uses_http_transport_when_github_credentials_are_configured(self, run_api):
@@ -55,6 +84,53 @@ class RunGhTests(unittest.TestCase):
         )
 
         self.assertEqual(result, [])
+
+    @patch("github_collector.get_pull_request_diff")
+    @patch("github_collector.get_pr_issue_comments", return_value=[])
+    @patch("github_collector.get_pr_reviews", return_value=[])
+    @patch("github_collector.get_pr_review_comments")
+    def test_collects_any_author_replies_only_for_trusted_roots(
+        self, review_comments, reviews, issue_comments, get_diff
+    ):
+        review_comments.return_value = [
+            {
+                "id": 10, "user": {"login": "trusted"}, "body": "Use a port.",
+                "path": "service.py", "diff_hunk": "@@ old @@",
+                "created_at": "2026-01-01", "html_url": "https://example/10",
+            },
+            {
+                "id": 11, "in_reply_to_id": 10,
+                "user": {"login": "author"}, "body": "Implemented.",
+                "created_at": "2026-01-02", "html_url": "https://example/11",
+            },
+            {
+                "id": 20, "user": {"login": "untrusted"}, "body": "Unrelated.",
+                "created_at": "2026-01-01", "html_url": "https://example/20",
+            },
+        ]
+        get_diff.return_value = "diff --git a/service.py b/service.py\n+class Port:"
+        pull_request = {
+            "number": 12, "title": "PR", "html_url": "https://example/12",
+            "state": "closed", "merged_at": "2026-01-03",
+        }
+
+        result = github_collector._collect_for_pr(
+            "org/repo", ["trusted", "another-trusted"], pull_request
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].reviewer, "trusted")
+        self.assertEqual(result[0].replies[0]["author"], "author")
+        self.assertIn("class Port", result[0].final_diff)
+
+    @patch.dict("github_collector.os.environ", {"GITHUB_TOKEN": "token"}, clear=True)
+    @patch("github_collector.requests.get")
+    def test_rejects_oversized_complete_diff(self, get):
+        response = get.return_value
+        response.text = "x" * (github_collector.MAX_FINAL_DIFF_CHARS + 1)
+
+        with self.assertRaisesRegex(ValueError, "maximum supported"):
+            github_collector.get_pull_request_diff("org/repo", 12)
 
     @patch("github_collector.subprocess.run")
     def test_flattens_every_paginated_json_document(self, run):

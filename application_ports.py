@@ -23,6 +23,11 @@ class DeliveryStore(Protocol):
 
 
 class ModelClient(Protocol):
+    def call_json(
+        self, deployment: str, system_prompt: str, user_prompt: str,
+        *, temperature: float = 0.2,
+    ) -> dict: ...
+
     def call_text(
         self,
         deployment: str,
@@ -37,14 +42,21 @@ class ModelClient(Protocol):
 
 
 class ReviewNoteStore(Protocol):
-    def save_notes(self, notes: list[dict], reviewer: str) -> int: ...
+    def save_notes(self, notes: list[dict]) -> int: ...
+
+    def replace_notes(self, notes: list[dict], repos: list[str]) -> int: ...
 
     def delete_notes(self, notes: list[dict]) -> int: ...
 
     def search(
-        self, query: str, repo: str, limit: int = 5, reviewer: str | None = None
+        self, query: str, repo: str, limit: int = 5,
+        reviewers: list[str] | None = None,
     ) -> list[dict]: ...
 
 
 class JobPublisher(Protocol):
     def publish(self, job: dict) -> None: ...
+
+
+class PullRequestPublisher(Protocol):
+    def publish(self, repo: str, pr_number: int, body: str, head_sha: str) -> str: ...

@@ -131,3 +131,15 @@ class SqsJobPublisher:
             QueueUrl=self._queue_url,
             MessageBody=json.dumps(job, separators=(",", ":")),
         )
+
+
+class RoutedSqsJobPublisher:
+    def __init__(self, publishers: dict[str, SqsJobPublisher]):
+        self._publishers = publishers
+
+    def publish(self, job: dict) -> None:
+        work_type = job.get("work_type")
+        publisher = self._publishers.get(work_type)
+        if publisher is None:
+            raise ValueError(f"No queue is configured for work type {work_type!r}")
+        publisher.publish(job)
