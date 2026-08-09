@@ -32,6 +32,8 @@ azure_openai:
   deployment: "your-deployment-name"
   api_version: "2025-03-01-preview"   # override: AZURE_OPENAI_API_VERSION
   api_mode: "responses"               # override: AZURE_OPENAI_API_MODE
+  # Local/batch request timeout. AWS webhook workers instead use the tighter
+  # PR_TO_SKILL_OPENAI_TIMEOUT supplied by SAM.
   request_timeout: 1800               # override: AGENT_REQUEST_TIMEOUT
   max_output_tokens: 120000           # override: AGENT_MAX_OUTPUT_TOKENS
   # Azure Foundry embedding deployment used by the OpenSearch vector adapter.
