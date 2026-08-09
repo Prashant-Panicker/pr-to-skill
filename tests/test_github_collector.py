@@ -1,3 +1,4 @@
+import base64
 import subprocess
 import threading
 import unittest
@@ -7,6 +8,68 @@ import github_collector
 
 
 class RunGhTests(unittest.TestCase):
+    @patch("github_collector.run_gh")
+    def test_repository_tree_resolves_commit_and_returns_only_blobs(self, run_gh):
+        run_gh.side_effect = [
+            {"tree": {"sha": "tree-sha"}},
+            {
+                "truncated": False,
+                "tree": [
+                    {"path": "src", "type": "tree", "sha": "directory"},
+                    {"path": "src/api.py", "type": "blob", "sha": "blob-sha", "size": 12},
+                ],
+            },
+        ]
+
+        result = github_collector.get_repository_tree("org/repo", "head-sha")
+
+        self.assertEqual(
+            result,
+            [{"path": "src/api.py", "sha": "blob-sha", "size": 12}],
+        )
+        self.assertEqual(run_gh.call_args_list[0].args[0], [
+            "api", "repos/org/repo/git/commits/head-sha",
+        ])
+        self.assertEqual(
+            run_gh.call_args_list[0].kwargs,
+            {"max_retries": 1, "timeout_seconds": 15},
+        )
+        self.assertEqual(run_gh.call_args_list[1].args[0], [
+            "api", "repos/org/repo/git/trees/tree-sha?recursive=1",
+        ])
+        self.assertEqual(
+            run_gh.call_args_list[1].kwargs,
+            {"max_retries": 1, "timeout_seconds": 15},
+        )
+
+    @patch("github_collector.run_gh")
+    def test_repository_blob_decodes_line_wrapped_utf8(self, run_gh):
+        encoded = base64.b64encode(b"def validate():\n    return True\n").decode()
+        run_gh.return_value = {
+            "encoding": "base64",
+            "content": f"{encoded[:12]}\n{encoded[12:]}",
+        }
+
+        result = github_collector.get_repository_blob(
+            "org/repo", "blob-sha", max_bytes=100
+        )
+
+        self.assertEqual(result, "def validate():\n    return True\n")
+        self.assertEqual(
+            run_gh.call_args.kwargs,
+            {"max_retries": 1, "timeout_seconds": 15},
+        )
+
+    @patch("github_collector.run_gh")
+    def test_repository_tree_rejects_truncated_result(self, run_gh):
+        run_gh.side_effect = [
+            {"tree": {"sha": "tree-sha"}},
+            {"truncated": True, "tree": []},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            github_collector.get_repository_tree("org/repo", "head-sha")
+
     @patch("github_collector.run_gh")
     @patch("github_collector.get_pr_reviews")
     def test_review_publisher_skips_head_already_posted(self, get_reviews, run_gh):
@@ -23,18 +86,100 @@ class RunGhTests(unittest.TestCase):
         run_gh.assert_not_called()
 
     @patch("github_collector.run_gh")
+    @patch("github_collector.get_pull_request")
     @patch("github_collector.get_pr_reviews", return_value=[])
-    def test_review_publisher_posts_comment_for_new_head(self, get_reviews, run_gh):
-        run_gh.return_value = {"html_url": "https://example/review/2"}
+    def test_review_publisher_posts_comment_for_new_head(
+        self, get_reviews, get_pull_request, run_gh
+    ):
+        get_pull_request.return_value = {"head": {"sha": "abc123"}}
+        run_gh.side_effect = [
+            {"id": 42, "html_url": "https://example/review/2"},
+            {"html_url": "https://example/review/2"},
+        ]
 
         github_collector.GitHubReviewPublisher().publish(
             "org/repo", 12, "Review", "abc123"
         )
 
-        request = run_gh.call_args.args[0]
-        self.assertIn("event=COMMENT", request)
-        self.assertIn("commit_id=abc123", request)
-        self.assertTrue(any("pr-to-skill:abc123" in value for value in request))
+        create_request = run_gh.call_args_list[0].args[0]
+        submit_request = run_gh.call_args_list[1].args[0]
+        self.assertNotIn("event=COMMENT", create_request)
+        self.assertIn("commit_id=abc123", create_request)
+        self.assertTrue(any(
+            "pr-to-skill:abc123" in value for value in create_request
+        ))
+        self.assertIn("repos/org/repo/pulls/12/reviews/42/events", submit_request)
+        self.assertIn("event=COMMENT", submit_request)
+
+    @patch("github_collector.run_gh")
+    @patch("github_collector.get_pull_request")
+    @patch("github_collector.get_pr_reviews", return_value=[])
+    def test_review_publisher_deletes_pending_review_when_head_changes(
+        self, get_reviews, get_pull_request, run_gh
+    ):
+        get_pull_request.return_value = {"head": {"sha": "new-head"}}
+        run_gh.side_effect = [{"id": 42}, {}]
+
+        with self.assertRaisesRegex(RuntimeError, "head changed"):
+            github_collector.GitHubReviewPublisher().publish(
+                "org/repo", 12, "Review", "old-head"
+            )
+
+        delete_request = run_gh.call_args_list[1].args[0]
+        self.assertIn("--method", delete_request)
+        self.assertIn("DELETE", delete_request)
+        self.assertIn("repos/org/repo/pulls/12/reviews/42", delete_request)
+
+    @patch("github_collector.run_gh")
+    @patch("github_collector.get_pull_request")
+    @patch("github_collector.get_pr_reviews")
+    def test_review_publisher_replaces_matching_pending_review(
+        self, get_reviews, get_pull_request, run_gh
+    ):
+        get_reviews.return_value = [{
+            "id": 41,
+            "state": "PENDING",
+            "body": "Review\n\n<!-- pr-to-skill:abc123 -->",
+        }]
+        get_pull_request.return_value = {"head": {"sha": "abc123"}}
+        run_gh.side_effect = [
+            {},
+            {"id": 42, "html_url": "https://example/review/2"},
+            {"html_url": "https://example/review/2"},
+        ]
+
+        result = github_collector.GitHubReviewPublisher().publish(
+            "org/repo", 12, "Review", "abc123"
+        )
+
+        self.assertEqual(result, "https://example/review/2")
+        self.assertIn(
+            "repos/org/repo/pulls/12/reviews/41",
+            run_gh.call_args_list[0].args[0],
+        )
+
+    @patch("github_collector.run_gh")
+    @patch("github_collector.get_pull_request")
+    @patch("github_collector.get_pr_reviews", return_value=[])
+    def test_review_publisher_deletes_pending_review_when_submit_fails(
+        self, get_reviews, get_pull_request, run_gh
+    ):
+        get_pull_request.return_value = {"head": {"sha": "abc123"}}
+        run_gh.side_effect = [
+            {"id": 42},
+            RuntimeError("submit failed"),
+            {},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "submit failed"):
+            github_collector.GitHubReviewPublisher().publish(
+                "org/repo", 12, "Review", "abc123"
+            )
+
+        self.assertIn(
+            "repos/org/repo/pulls/12/reviews/42",
+            run_gh.call_args_list[2].args[0],
+        )
 
     @patch.dict("github_collector.os.environ", {"GITHUB_TOKEN": "token"}, clear=True)
     @patch("github_collector._run_github_api", return_value={"number": 12})

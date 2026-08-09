@@ -17,6 +17,8 @@ GitHub webhook
   -> review SQS -> review Lambda
        pull_request opened/reopened/synchronize/ready_for_review
          -> retrieve repository-scoped OpenSearch evidence
+         -> show Azure Foundry the PR diff and immutable head file tree
+         -> fetch only the branch files Azure Foundry requests for context
          -> generate a review with Azure Foundry
          -> save it in S3 and post a GitHub review for the verified head SHA
   -> mining SQS -> mining Lambda
@@ -42,6 +44,23 @@ Completed GitHub delivery IDs and expiring workflow locks are stored in
 DynamoDB. Each SQS queue retries failed deliveries and sends a message to the
 DLQ after five receives. Posted reviews carry a hidden head-SHA marker, so a
 retry does not post the same review twice.
+
+PR review uses a bounded two-stage context flow and never clones the repository.
+The first model call receives the PR description, changed-file patches,
+historical evidence, and file paths plus sizes from the PR's immutable head
+tree. It may request up to eight exact paths. Only those UTF-8 blobs are then
+fetched by Git SHA and supplied to the final review call, allowing the review to
+inspect surrounding implementations, callers, configuration, and existing
+tests when needed. Each selected file is limited to 50,000 bytes, selected
+context to 120,000 characters, and the repository manifest to 20,000 files or
+200,000 characters. Invalid, duplicate, oversized, or non-tree paths fail
+explicitly rather than broadening repository access. Oversized files are not
+offered for selection, and selected blobs that are not UTF-8 text are skipped.
+Selective tree/blob API calls use a 15-second timeout without retries. The
+deployed review worker caps each Azure embedding or generation call at 120
+seconds and disables SDK retries so the workflow remains bounded by its Lambda
+deadline.
+Each model input is serialized as JSON and limited to 400,000 characters.
 
 ## Local setup
 

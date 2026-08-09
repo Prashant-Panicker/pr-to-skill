@@ -109,6 +109,7 @@ def build_event_processor(work_type: str) -> EventProcessor:
         api_mode=openai_config["api_mode"],
         max_output_tokens=openai_config["max_output_tokens"],
         api_key=openai_config.get("api_key"),
+        max_retries=0,
     )
     store = vector_store.create_store(search_config, client)
     artifacts = S3ArtifactStore(

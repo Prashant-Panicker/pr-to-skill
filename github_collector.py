@@ -7,6 +7,8 @@ you've already set up (`gh auth login`), handles pagination cleanly with
 --paginate, and needs zero extra credential plumbing.
 """
 
+import base64
+import binascii
 import json
 import os
 import subprocess
@@ -37,6 +39,10 @@ _TRANSIENT_GH_ERROR_MARKERS = (
     "status 504",
 )
 MAX_FINAL_DIFF_CHARS = 500_000
+
+
+class RepositoryBlobUnavailableError(ValueError):
+    pass
 
 
 def _parse_json_documents(text: str) -> list[list | dict]:
@@ -106,7 +112,9 @@ class _GitHubTokenProvider:
 _TOKEN_PROVIDER = _GitHubTokenProvider()
 
 
-def _run_github_api(args: list[str], max_retries: int) -> list | dict:
+def _run_github_api(
+    args: list[str], max_retries: int, timeout_seconds: int = 60
+) -> list | dict:
     paginate = "--paginate" in args
     method = "GET"
     fields: dict[str, str] = {}
@@ -142,7 +150,7 @@ def _run_github_api(args: list[str], max_retries: int) -> list | dict:
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
                 json=fields or None,
-                timeout=60,
+                timeout=timeout_seconds,
             )
             if response.status_code not in {429, 502, 503, 504}:
                 response.raise_for_status()
@@ -160,15 +168,21 @@ def _run_github_api(args: list[str], max_retries: int) -> list | dict:
     return collected
 
 
-def run_gh(args: list[str], max_retries: int = 3) -> list | dict:
+def run_gh(
+    args: list[str], max_retries: int = 3, timeout_seconds: int = 60
+) -> list | dict:
     """Run a `gh` command and return parsed JSON, retrying transient failures."""
     if os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_APP_ID"):
-        return _run_github_api(args, max_retries)
+        if timeout_seconds == 60:
+            return _run_github_api(args, max_retries)
+        return _run_github_api(args, max_retries, timeout_seconds)
     cmd = ["gh"] + args
     
     for attempt in range(max_retries):
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout_seconds
+            )
             
             # Check for transient network errors in stderr
             if result.returncode != 0:
@@ -242,16 +256,95 @@ def list_closed_prs(repo: str, updated_after: Optional[str] = None) -> list[dict
     return [pull_request for pull_request in prs if pull_request.get("merged_at")]
 
 
-def get_pull_request(repo: str, pr_number: int) -> dict:
-    return run_gh(["api", f"repos/{repo}/pulls/{pr_number}"])
+def get_pull_request(
+    repo: str, pr_number: int, *, max_retries: int = 3, timeout_seconds: int = 60
+) -> dict:
+    return run_gh(
+        ["api", f"repos/{repo}/pulls/{pr_number}"],
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+    )
 
 
-def get_pull_request_files(repo: str, pr_number: int) -> list[dict]:
+def get_pull_request_files(
+    repo: str, pr_number: int, *, max_retries: int = 3, timeout_seconds: int = 60
+) -> list[dict]:
     endpoint = f"repos/{repo}/pulls/{pr_number}/files?per_page=100"
-    return run_gh(["api", "--paginate", endpoint])
+    return run_gh(
+        ["api", "--paginate", endpoint],
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+    )
 
 
-def get_pull_request_diff(repo: str, pr_number: int) -> str:
+def get_repository_tree(repo: str, commit_sha: str) -> list[dict]:
+    commit = run_gh(
+        ["api", f"repos/{repo}/git/commits/{commit_sha}"],
+        max_retries=1,
+        timeout_seconds=15,
+    )
+    if not isinstance(commit, dict):
+        raise ValueError("GitHub returned an invalid Git commit")
+    tree_reference = commit.get("tree")
+    tree_sha = tree_reference.get("sha") if isinstance(tree_reference, dict) else None
+    if not isinstance(tree_sha, str) or not tree_sha:
+        raise ValueError("GitHub Git commit is missing its tree SHA")
+    response = run_gh(
+        ["api", f"repos/{repo}/git/trees/{tree_sha}?recursive=1"],
+        max_retries=1,
+        timeout_seconds=15,
+    )
+    if not isinstance(response, dict) or not isinstance(response.get("tree"), list):
+        raise ValueError("GitHub returned an invalid repository tree")
+    if response.get("truncated"):
+        raise ValueError("GitHub truncated the repository tree")
+    blobs = []
+    for item in response["tree"]:
+        if not isinstance(item, dict) or item.get("type") != "blob":
+            continue
+        path = item.get("path")
+        sha = item.get("sha")
+        size = item.get("size")
+        if not isinstance(path, str) or not path or not isinstance(sha, str):
+            raise ValueError("GitHub repository tree contains an invalid blob")
+        if not isinstance(size, int) or size < 0:
+            raise ValueError("GitHub repository tree contains an invalid blob size")
+        blobs.append({"path": path, "sha": sha, "size": size})
+    return blobs
+
+
+def get_repository_blob(repo: str, blob_sha: str, max_bytes: int) -> str:
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be at least 1")
+    response = run_gh(
+        ["api", f"repos/{repo}/git/blobs/{blob_sha}"],
+        max_retries=1,
+        timeout_seconds=15,
+    )
+    if not isinstance(response, dict) or response.get("encoding") != "base64":
+        raise ValueError("GitHub returned an unsupported repository blob")
+    content = response.get("content")
+    if not isinstance(content, str):
+        raise ValueError("GitHub repository blob is missing content")
+    try:
+        decoded = base64.b64decode("".join(content.split()), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("GitHub returned invalid base64 blob content") from exc
+    if len(decoded) > max_bytes:
+        raise RepositoryBlobUnavailableError(
+            f"Repository blob exceeds the {max_bytes}-byte limit"
+        )
+    try:
+        return decoded.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RepositoryBlobUnavailableError(
+            "Repository blob is not UTF-8 text"
+        ) from exc
+
+
+def get_pull_request_diff(
+    repo: str, pr_number: int, *, timeout_seconds: int = 120
+) -> str:
     endpoint = f"repos/{repo}/pulls/{pr_number}"
     if os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_APP_ID"):
         response = requests.get(
@@ -261,14 +354,14 @@ def get_pull_request_diff(repo: str, pr_number: int) -> str:
                 "Accept": "application/vnd.github.diff",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            timeout=120,
+            timeout=timeout_seconds,
         )
         response.raise_for_status()
         diff = response.text
     else:
         result = subprocess.run(
             ["gh", "api", "-H", "Accept: application/vnd.github.diff", endpoint],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=timeout_seconds,
         )
         if result.returncode != 0:
             raise RuntimeError(f"gh command failed while fetching PR diff: {result.stderr}")
@@ -286,16 +379,71 @@ def get_pull_request_diff(repo: str, pr_number: int) -> str:
 class GitHubReviewPublisher:
     def publish(self, repo: str, pr_number: int, body: str, head_sha: str) -> str:
         marker = f"<!-- pr-to-skill:{head_sha} -->"
-        reviews = get_pr_reviews(repo, pr_number)
+        reviews = get_pr_reviews(
+            repo, pr_number, max_retries=1, timeout_seconds=15
+        )
         for review in reviews:
-            if marker in (review.get("body") or ""):
+            if marker not in (review.get("body") or ""):
+                continue
+            if review.get("state") != "PENDING":
                 return review.get("html_url", "")
-        response = run_gh([
-            "api", "--method", "POST", f"repos/{repo}/pulls/{pr_number}/reviews",
-            "-f", f"body={body}\n\n{marker}", "-f", "event=COMMENT",
-            "-f", f"commit_id={head_sha}",
-        ])
-        return response.get("html_url", "")
+            review_id = review.get("id")
+            if not isinstance(review_id, int):
+                raise ValueError("GitHub pending review did not contain an id")
+            run_gh(
+                [
+                    "api", "--method", "DELETE",
+                    f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}",
+                ],
+                max_retries=1,
+                timeout_seconds=15,
+            )
+        pending_review = run_gh(
+            [
+                "api", "--method", "POST",
+                f"repos/{repo}/pulls/{pr_number}/reviews",
+                "-f", f"body={body}\n\n{marker}",
+                "-f", f"commit_id={head_sha}",
+            ],
+            max_retries=1,
+            timeout_seconds=15,
+        )
+        review_id = pending_review.get("id")
+        if not isinstance(review_id, int):
+            raise ValueError("GitHub pending review response did not contain an id")
+        try:
+            current_pull_request = get_pull_request(
+                repo, pr_number, max_retries=1, timeout_seconds=15
+            )
+            if current_pull_request.get("head", {}).get("sha") != head_sha:
+                raise RuntimeError(
+                    "Pull request head changed before review publication"
+                )
+            response = run_gh(
+                [
+                    "api", "--method", "POST",
+                    f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}/events",
+                    "-f", "event=COMMENT",
+                ],
+                max_retries=1,
+                timeout_seconds=15,
+            )
+        except Exception as publish_error:
+            try:
+                run_gh(
+                    [
+                        "api", "--method", "DELETE",
+                        f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}",
+                    ],
+                    max_retries=1,
+                    timeout_seconds=15,
+                )
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "Review publication failed and its pending review could not be deleted"
+                ) from cleanup_error
+            raise
+        return response.get("html_url") or pending_review.get("html_url", "")
 
 
 def get_pr_review_comments(repo: str, pr_number: int) -> list[dict]:
@@ -304,10 +452,16 @@ def get_pr_review_comments(repo: str, pr_number: int) -> list[dict]:
     return run_gh(["api", "--paginate", endpoint])
 
 
-def get_pr_reviews(repo: str, pr_number: int) -> list[dict]:
+def get_pr_reviews(
+    repo: str, pr_number: int, *, max_retries: int = 3, timeout_seconds: int = 60
+) -> list[dict]:
     """Review summaries (APPROVE / REQUEST_CHANGES / COMMENT with a body)."""
     endpoint = f"repos/{repo}/pulls/{pr_number}/reviews?per_page=100"
-    return run_gh(["api", "--paginate", endpoint])
+    return run_gh(
+        ["api", "--paginate", endpoint],
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def get_pr_issue_comments(repo: str, pr_number: int) -> list[dict]:

@@ -248,7 +248,7 @@ Resources:
           AWS_OPENSEARCH_ENDPOINT: !GetAtt OpenSearchCollection.CollectionEndpoint
           AWS_OPENSEARCH_INDEX: pr-review-notes
           AWS_OPENSEARCH_SERVICE: aoss
-          PR_TO_SKILL_OPENAI_TIMEOUT: '600'
+          PR_TO_SKILL_OPENAI_TIMEOUT: '120'
           PR_TO_SKILL_WORKFLOW_DEADLINE: '780'
       Events:
         Queue:

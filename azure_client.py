@@ -126,14 +126,17 @@ def get_client(
     api_mode: str = "responses",
     max_output_tokens: int = 30000,
     api_key: str | None = None,
+    max_retries: int = 2,
 ) -> AzureModelClient:
     if request_timeout <= 0:
         raise ValueError("request_timeout must be a positive integer")
+    if max_retries < 0:
+        raise ValueError("max_retries must be a non-negative integer")
     client_kwargs: dict[str, Any] = {
         "azure_endpoint": endpoint.rstrip("/"),
         "api_version": api_version,
         "timeout": request_timeout,
-        "max_retries": 2,
+        "max_retries": max_retries,
     }
     # Prefer an explicit API key when configured; otherwise fall back to the
     # Azure AD / Entra ID token provider (e.g. an ``az login`` session).

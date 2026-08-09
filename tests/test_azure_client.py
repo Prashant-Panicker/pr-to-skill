@@ -102,6 +102,20 @@ class AzureModelClientTests(unittest.TestCase):
 
     @patch("azure_client.get_token_provider", return_value="provider")
     @patch("azure_client.AzureOpenAI")
+    def test_supports_disabling_sdk_retries(self, azure_openai, token_provider):
+        azure_openai.return_value = Mock()
+
+        azure_client.get_client(
+            "https://resource.openai.azure.com/",
+            "2025-03-01-preview",
+            request_timeout=210,
+            max_retries=0,
+        )
+
+        self.assertEqual(azure_openai.call_args.kwargs["max_retries"], 0)
+
+    @patch("azure_client.get_token_provider", return_value="provider")
+    @patch("azure_client.AzureOpenAI")
     def test_falls_back_to_token_provider_without_api_key(
         self, azure_openai, token_provider
     ):
