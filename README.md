@@ -1,8 +1,8 @@
-# pr-review-profiler
+# PR Review Intelligence System
 
-Mines a person's historical PR feedback into a reusable `SKILL.md`, then uses
-that history as repository-scoped evidence when new pull requests are opened.
-The batch and event-driven paths share provider-neutral application ports.
+PR Review Intelligence System turns trusted historical pull-request feedback into repository-scoped guidance and uses it to review new pull requests. It combines a GitHub webhook, durable queues, retrieval, and Azure Foundry model calls without cloning repositories.
+
+The review path verifies webhook signatures and the immutable head SHA, retrieves relevant OpenSearch evidence, requests bounded file context, stores the result in S3, and posts the review back to GitHub. The mining path processes merged feedback and regenerates the durable `SKILL.md` guidance.
 
 Azure Foundry is retained for model and embedding calls because it is the
 approved organizational AI interface. All other deployed infrastructure is
